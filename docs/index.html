@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Sunshare Cloud API (Reverse-Engineered)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script src="https://unpkg.com/@stoplight/elements/web-components.min.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/@stoplight/elements/styles.min.css" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; }
+      elements-api { height: 100vh; display: block; }
+    </style>
+  </head>
+  <body>
+    <elements-api
+      apiDescriptionUrl="../openapi/sunshare-api.yaml"
+      router="hash"
+      layout="sidebar"
+      tryItCredentialsPolicy="same-origin"
+    />
+  </body>
+</html>
