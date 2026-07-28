@@ -1,0 +1,12 @@
+{
+  "name": "sunshare-inverter-api",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Reverse-engineered Sunshare/Sunsharetek cloud API documentation and tooling, laid out for a future Home Assistant custom integration.",
+  "scripts": {
+    "docs": "serve . -l 4400"
+  },
+  "devDependencies": {
+    "serve": "^14.2.4"
+  }
+}

@@ -1,0 +1,30 @@
+# Secrets / session state — never commit
+.sunshare_token.json
+.sunshare_credentials.json
+*.keystore
+
+# Local tooling
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Large / sensitive reverse-engineering artifacts (kept locally only —
+# the .so is a large binary, the bugreport/pcap contain real device +
+# account data from the phone used during analysis)
+libapp.so
+codeinfo.txt
+poolinfo.txt
+applog.txt
+sunshare_bt/
+sunshare_bt.zip
+*.pcap
+
+# Patched/signed APKs produced during the MITM experiment
+apk_orig/
+resigned_splits/
+final_signed/
+*.apk

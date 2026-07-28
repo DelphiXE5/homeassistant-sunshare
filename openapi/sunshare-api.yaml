@@ -1,0 +1,1006 @@
+openapi: 3.0.3
+info:
+  title: Sunshare / Sunsharetek Cloud API (Reverse-Engineered)
+  version: 1.0.0
+  description: |
+    Unofficial, reverse-engineered documentation of the Sunshare/Sunsharetek cloud REST API,
+    used by the `com.sunshare.cloud` Android app (versionName 1.2.0) to control and monitor
+    Sunshare micro-inverter / micro-storage devices.
+
+    Derived from static analysis of the app's Flutter/Dart AOT snapshot plus live black-box
+    testing against a real account and device. See `API_DOCUMENTATION.md` in the repo root for
+    full narrative notes, including *why* certain schemas were chosen and a log of failed
+    attempts for endpoints that are not yet working.
+
+    ### Confidence levels
+    Every operation's description is prefixed with one of:
+    - **[CONFIRMED]** — tested live, response verified (and for control endpoints, verified to
+      actually change device state).
+    - **[FAILING]** — endpoint is reachable but every request body tried returns a generic
+      server error; the documented request body is a best guess, not a working contract.
+    - **[UNTESTED]** — found only in the app's binary string pool, never called live. Schema is
+      inferred from naming and adjacent strings.
+
+    ### Path-prefix quirk
+    Servers below already end in `/app`. Most `sysDeviceInfo`/`inveRealDataMinute` paths *also*
+    start with `/app/...` themselves — this doubling is real and required, not a typo. `/auth/*`
+    paths do not double.
+
+    ### Session behavior
+    Only one login session is valid per account at a time. Logging in again (e.g. from the
+    mobile app) invalidates any other active token.
+
+    ### Intended use
+    This spec is a step toward a future Home Assistant custom integration (see repo README) —
+    it documents exactly the calls such an integration would need for sensor polling
+    (inverter/battery data) and control (output wattage, EMS mode).
+  contact:
+    name: Project notes
+    url: https://github.com/
+servers:
+  - url: https://web.sunsharetek.com/app
+    description: Production (confirmed working, used for all testing)
+  - url: https://iot.sunsharetek.com/app
+    description: Found in binary, untested
+  - url: https://dev.sunsharetek.com/app
+    description: Found in binary, untested — likely dev/staging
+
+tags:
+  - name: Auth
+    description: Login and session management
+  - name: Devices
+    description: Device discovery and status
+  - name: Home
+    description: Home/account grouping info
+  - name: EMS Settings
+    description: Reading and writing power/EMS/battery control settings
+  - name: Statistics
+    description: Historical and lifetime energy statistics
+  - name: Reference
+    description: Lookup/reference data not tied to a specific device
+  - name: Untested
+    description: Found in the binary, never called live — schema is a guess
+
+components:
+  securitySchemes:
+    accessToken:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: >
+        Raw JWT returned by POST /auth/login, used verbatim with NO "Bearer " prefix.
+        Only one session per account is valid at a time.
+
+  schemas:
+    LoginRequest:
+      type: object
+      required: [userAccount, password]
+      properties:
+        userAccount:
+          type: string
+          format: email
+          description: Must be named `userAccount` — `username`/`email`/`loginEmail` are rejected.
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          example: 200
+        msg:
+          type: string
+          nullable: true
+        data:
+          type: object
+          properties:
+            access_token:
+              type: string
+              description: JWT. Use verbatim as the Authorization header value on later calls.
+            expires_in:
+              type: integer
+              example: 43200
+            realTime:
+              type: integer
+            incomeTime:
+              type: integer
+            devicePage:
+              type: integer
+            faultTime:
+              type: integer
+            deviceTime:
+              type: integer
+            switchTime:
+              type: integer
+
+    Device:
+      type: object
+      description: Summary device entity as returned by findDeviceListByUserId.
+      properties:
+        id:
+          type: integer
+          description: Numeric deviceId used by almost every other endpoint.
+        sn:
+          type: string
+          description: Physical device serial number.
+        deviceName:
+          type: string
+        deviceType:
+          type: integer
+          description: "2 observed for a Micro-storage device. Other values (e.g. plain Micro-inverter) untested."
+        deviceTypeDec:
+          type: string
+          example: Micro-storage
+        power:
+          type: number
+          nullable: true
+        consumption:
+          type: number
+          nullable: true
+        es:
+          type: integer
+          nullable: true
+          description: Short status flag, exact meaning unconfirmed (energy-storage status, by naming convention).
+        ss:
+          type: integer
+          nullable: true
+          description: Short status flag, exact meaning unconfirmed (solar status, by naming convention).
+        ds:
+          type: integer
+          nullable: true
+          description: Short status flag, exact meaning unconfirmed (device status, by naming convention).
+        emsStatus:
+          type: integer
+        statusDec:
+          type: string
+          example: on-line
+        rssi:
+          type: integer
+        countryMaxPower:
+          type: integer
+          description: Grid feed-in power cap (W) for the device's country/region.
+        wifiName:
+          type: string
+        clientId:
+          type: string
+          description: MQTT client id used by the device on Alibaba Cloud IoT.
+
+    DeviceDetail:
+      allOf:
+        - $ref: '#/components/schemas/Device'
+        - type: object
+          description: Full entity as returned by findById.
+          properties:
+            model:
+              type: string
+              example: SR-C1K2EU
+            brand:
+              type: string
+              example: SUNSHARE
+            hwVersionNo:
+              type: string
+            otaVer:
+              type: string
+            appVersion:
+              type: string
+            permPower:
+              type: integer
+              description: >
+                Default-load / output wattage setting (W). Present here as a denormalized
+                top-level column — NOTE: writing this field via updateById does NOT affect the
+                physical device. See emsModePara and the EMS Settings section.
+            maxGridPower:
+              type: integer
+            emsModePara:
+              type: string
+              description: >
+                JSON-encoded string containing the authoritative EmsModePara config
+                (emsStrategyType, permPower, powerSetPojos, deviceId, homeId, isOnlySave,
+                eleType). This is what actually drives the device, not the top-level permPower
+                column.
+            emsModeAdvan:
+              type: string
+              description: >
+                JSON-encoded string containing the authoritative EmsModeAdvan config
+                (countryMaxPower, socMax, socMin, zeroNetworkButton).
+            electrovalency:
+              type: number
+            currency:
+              type: string
+            eleUnit:
+              type: string
+            areaId:
+              type: integer
+            areaName:
+              type: string
+            lat:
+              type: string
+            lon:
+              type: string
+            warranty:
+              type: string
+            instanceId:
+              type: string
+              description: Alibaba Cloud IoT MQTT instance id.
+            endPoint:
+              type: string
+              example: mqtt-cn-fxf45evy502.mqtt.aliyuncs.com:8883
+            userName:
+              type: string
+              description: MQTT device credential identifier.
+            mapList:
+              type: array
+              items:
+                type: object
+                properties:
+                  packSn:
+                    type: string
+                  warrantyTime:
+                    type: string
+
+    MesSettingUpdatePojo:
+      type: object
+      description: >
+        The structured EMS/power-schedule settings object. Wrapping key is required for the
+        write endpoint (see updateEmsParaById) — this was the key discovery that made writes work.
+      properties:
+        emsStrategyType:
+          type: integer
+          example: 1
+        homeLoadSource:
+          type: integer
+          nullable: true
+        meterList:
+          type: array
+          nullable: true
+          items: {}
+        socketList:
+          type: array
+          nullable: true
+          items: {}
+        permPower:
+          type: integer
+          description: The output/default-load wattage (W) — this is the actual control value.
+        powerSetPojos:
+          type: array
+          description: Time-based power schedule entries. Empty array observed when no schedule is active.
+          items:
+            type: object
+            description: "[UNTESTED] Sub-schema not confirmed — no populated example observed."
+        deviceId:
+          type: integer
+        userId:
+          type: integer
+          nullable: true
+        homeId:
+          type: integer
+          nullable: true
+        isOnlySave:
+          type: integer
+          example: 0
+        eleType:
+          type: integer
+          nullable: true
+
+    EmsModeAdvan:
+      type: object
+      description: >
+        Battery SOC limits + grid feed-in cap. Read side confirmed working via
+        queryMesSettingUpdate; the write endpoint (updateEmsModeAdvanById) is [FAILING] — see
+        API_DOCUMENTATION.md for all attempted schemas.
+      properties:
+        adVanSetType:
+          type: integer
+          example: 0
+        socMin:
+          type: integer
+          description: Battery discharge-stop state-of-charge limit (%).
+          example: 20
+        socMax:
+          type: integer
+          description: Battery charge-stop state-of-charge limit (%).
+          example: 96
+        countryMaxPower:
+          type: integer
+          description: Grid feed-in power cap (W).
+        zeroNetworkButton:
+          type: integer
+        deviceId:
+          type: integer
+          nullable: true
+        isOnlySave:
+          type: integer
+          nullable: true
+
+    ApiEnvelope:
+      type: object
+      description: Generic response envelope used by nearly all endpoints.
+      properties:
+        code:
+          type: integer
+          description: 200 = success. 500 with msg=null typically means a server-side NPE, not a validation error.
+        msg:
+          type: string
+          nullable: true
+        data:
+          nullable: true
+
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      tags: [Auth]
+      summary: "[CONFIRMED] Log in and obtain an access token"
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login result (check `code`, not just HTTP status — HTTP 200 is returned even for logical failures).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+
+  /app/sysDeviceInfo/findDeviceListByUserId:
+    post:
+      operationId: findDeviceListByUserId
+      tags: [Devices]
+      summary: "[CONFIRMED] List all devices on the account"
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              example: {}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Device'
+
+  /app/sysDeviceInfo/findById:
+    post:
+      operationId: findDeviceById
+      tags: [Devices]
+      summary: "[CONFIRMED] Get the full device entity (richest single read call)"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: integer
+              example: {id: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DeviceDetail'
+
+  /app/sysDeviceInfo/findDeviceRealStatusByDeviceId:
+    post:
+      operationId: findDeviceRealStatusByDeviceId
+      tags: [Devices]
+      summary: "[CONFIRMED] Get device status (power/consumption fields were null in testing)"
+      description: >
+        [CONFIRMED] reachable, but `power`/`consumption`/`es` were consistently null in our
+        testing — unlike the same-named fields on findDeviceListByUserId, which were numeric.
+        Reason unconfirmed; prefer findDeviceListByUserId for those values until this is
+        investigated further.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties:
+                deviceId: {type: integer}
+              example: {deviceId: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+
+  /app/sysDeviceInfo/findDeviceListByHomeIdSimple:
+    post:
+      operationId: findDeviceListByHomeIdSimple
+      tags: [Devices]
+      summary: "[CONFIRMED] List devices grouped by home (returned empty for a single-device home)"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [homeId]
+              properties:
+                homeId: {type: integer}
+              example: {homeId: 2229}
+      responses:
+        '200':
+          description: OK — data was `[]` in testing (single-device home)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+
+  /app/sysDeviceInfo/queryOnlineStatusByDeviceIdAndOpenRealTime:
+    post:
+      operationId: openRealTime
+      tags: [Devices]
+      summary: "[CONFIRMED] Open a real-time telemetry session (pair with stopRealTimeByDeviceId)"
+      description: >
+        [CONFIRMED] reachable, returns `{status: 0}`. Named like a start-of-session call the app
+        makes before polling status repeatedly. In testing, calling this then immediately
+        re-reading findDeviceRealStatusByDeviceId did not populate previously-null fields —
+        may need a longer polling window or additional undocumented triggers.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/stopRealTimeByDeviceId:
+    post:
+      operationId: stopRealTime
+      tags: [Devices]
+      summary: "[CONFIRMED] Close a real-time telemetry session"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/getDeviceMqttOnlinOrNotOnlin:
+    post:
+      operationId: getDeviceMqttOnlineStatus
+      tags: [Devices]
+      summary: "[CONFIRMED] Cheap online/offline check"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: "OK — data: {status: 0}", content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysHome/findHomeList:
+    post:
+      operationId: findHomeList
+      tags: [Home]
+      summary: "[CONFIRMED] List the account's home(s)"
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, example: {}}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            homeId: {type: integer}
+                            homeName: {type: string}
+                            currency: {type: string}
+                            electrovalency: {type: number}
+                            eleType: {type: integer}
+                            isShare: {type: string}
+
+  /app/sysDeviceInfo/queryMesSettingUpdate:
+    post:
+      operationId: queryMesSettingUpdate
+      tags: [EMS Settings]
+      summary: "[CONFIRMED] Best read for current EMS/wattage/battery settings (structured, not stringified)"
+      description: >
+        [CONFIRMED] Preferred over parsing findById's emsModePara/emsModeAdvan JSON strings by
+        hand — this returns them pre-parsed.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          mesSettingUpdatePojo:
+                            $ref: '#/components/schemas/MesSettingUpdatePojo'
+                          emsModeAdvan:
+                            $ref: '#/components/schemas/EmsModeAdvan'
+                          emsWk:
+                            type: integer
+
+  /app/sysDeviceInfo/updateEmsParaById:
+    post:
+      operationId: updateEmsParaById
+      tags: [EMS Settings]
+      summary: "[CONFIRMED] Set output/default-load wattage — the real control endpoint"
+      description: >
+        [CONFIRMED] end-to-end (verified against the physical device, not just a DB read-back).
+        Body MUST be wrapped under `mesSettingUpdatePojo` — an unwrapped/flat body returns a
+        generic `{code: 500, msg: null}` (a server-side NPE, not a validation error — confirmed
+        by deliberately sending a wrong JSON type, which produced a real Jackson deserialization
+        error instead, proving the flat shape parses fine but the wrapper is what's actually
+        required).
+
+        A separate generic endpoint, `updateById`, will happily persist a changed `permPower` to
+        the database and return success, but does **not** propagate to the physical device —
+        only this endpoint triggers whatever downstream dispatch (presumably an MQTT publish)
+        actually reaches the hardware. Do not use `updateById` for control.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mesSettingUpdatePojo]
+              properties:
+                mesSettingUpdatePojo:
+                  $ref: '#/components/schemas/MesSettingUpdatePojo'
+              example:
+                mesSettingUpdatePojo:
+                  emsStrategyType: 1
+                  permPower: 150
+                  powerSetPojos: []
+                  deviceId: 14926
+                  isOnlySave: 0
+      responses:
+        '200':
+          description: "OK — `{code: 200, data: true}` on success"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+
+  /app/sysDeviceInfo/updateEmsModeAdvanById:
+    post:
+      operationId: updateEmsModeAdvanById
+      tags: [EMS Settings]
+      summary: "[FAILING] Set battery SOC min/max + grid feed-in cap — schema not yet found"
+      description: >
+        [FAILING] Presumably the write-counterpart for `emsModeAdvan` (battery socMin/socMax
+        charge/discharge limits, countryMaxPower grid cap, zeroNetworkButton) — but every schema
+        tried returns a generic `{code: 500, msg: null}`, the same NPE-style failure as the
+        unwrapped attempts against updateEmsParaById.
+
+        Tried and failed (see API_DOCUMENTATION.md §6 for the full list): wrapping under
+        `emsModeAdvan`, wrapping under `emsAdvanStagePojo` (a pool string found adjacent to
+        `adVanSetType`, by analogy with how `mesSettingUpdatePojo` was the correct wrapper for
+        the sibling endpoint), with/without a top-level `deviceId`/`id`, flat/unwrapped, and with
+        `sn` added. All six returned identical errors.
+
+        Next things to try: a `Pojo`-suffixed wrapper key not yet attempted; `sn` as the *only*
+        device reference (dropping `deviceId` entirely); additional fields not present in the
+        read-side response (`homeId`, `userId`); or decompiling `libapp.so`'s Dart AOT snapshot
+        for the actual DTO field names instead of further guessing.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: "Best guess — UNCONFIRMED, has never returned code:200."
+              properties:
+                emsAdvanStagePojo:
+                  $ref: '#/components/schemas/EmsModeAdvan'
+              example:
+                emsAdvanStagePojo:
+                  adVanSetType: 0
+                  socMin: 20
+                  socMax: 96
+                  countryMaxPower: 800
+                  zeroNetworkButton: 0
+                  deviceId: 14926
+                  isOnlySave: 0
+      responses:
+        '200':
+          description: "Always returns `{code: 500, msg: null}` in testing so far, regardless of schema variant tried."
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+
+  /app/sysDeviceInfo/updateById:
+    post:
+      operationId: updateDeviceById
+      tags: [EMS Settings]
+      summary: "[CONFIRMED] Generic entity update — persists to DB only, NOT device control"
+      description: >
+        [CONFIRMED] working as a raw CRUD write (accepts the full device entity from findById
+        with any field changed, returns `{code:200, data:true}`, change is readable back
+        immediately) — but confirmed via live device testing that it has **no effect on the
+        physical device**. Documented so it isn't mistaken for a control endpoint again; use
+        updateEmsParaById / updateEmsModeAdvanById instead.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceDetail'
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/getMaxGrid:
+    post:
+      operationId: getMaxGrid
+      tags: [Reference]
+      summary: "[CONFIRMED] Country/region max grid feed-in power lookup (not device-specific)"
+      description: >
+        [CONFIRMED] requires `areaId` — calling with `{}`, `sn`, or `deviceId` alone (no areaId)
+        returns the generic 500.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [areaId]
+              properties: {areaId: {type: integer}}
+              example: {areaId: 33}
+      responses:
+        '200':
+          description: "OK — e.g. `{data: {dictLabel: \"800\", dictValue: 33}}` (dictLabel = max watts for that area)"
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiEnvelope'
+
+  /app/inveRealDataMinute/selectInveSummary:
+    post:
+      operationId: selectInveSummary
+      tags: [Statistics]
+      summary: "[CONFIRMED] Lifetime generation/revenue/CO2 totals"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          totalAllPower: {type: number}
+                          totalAllPowerUnit: {type: string, example: kWh}
+                          totalAllPrice: {type: string}
+                          totalAllPriceUnit: {type: string}
+                          accuCo2Redu: {type: number}
+                          accuCo2ReduUnit: {type: string}
+                          dayPower: {type: number}
+                          dayPowerUnit: {type: string}
+
+  /app/inveRealDataMinute/energyPlanStatistics:
+    post:
+      operationId: energyPlanStatistics
+      tags: [Statistics]
+      summary: "[CONFIRMED] 48×30-minute default-load-power schedule for the day"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId]
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          permMap:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                timeStamp: {type: string, example: "00:00"}
+                                power: {type: integer}
+
+  /app/inveRealDataMinute/dataStatistics:
+    post:
+      operationId: inveDataStatistics
+      tags: [Statistics]
+      summary: "[CONFIRMED] Historical stats — requires dataType + date range, empty for this device"
+      description: >
+        [CONFIRMED] reachable. Without `beginTime`/`endTime` returns a misleading
+        `{code: 500, msg: "System maintenance in progress"}` — actually just a missing/unparsed
+        date range, not a real outage. With date params, `dataType` 0/1/3 returned `{code: 200}`
+        with no data (empty result), `dataType: 2` returned the maintenance error again. Likely
+        intended for a different device type than this Micro-storage unit — untested against an
+        actual Micro-inverter-type device.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, dataType, beginTime, endTime]
+              properties:
+                deviceId: {type: integer}
+                dataType: {type: integer, description: "0/1/3 return empty success; 2 errors. Exact meaning (day/month/year?) unconfirmed."}
+                beginTime: {type: string, format: date}
+                endTime: {type: string, format: date}
+              example: {deviceId: 14926, dataType: 0, beginTime: "2026-07-01", endTime: "2026-07-29"}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysMicoInverterRealDataMinute/realTimePower:
+    post:
+      operationId: micoInverterRealTimePower
+      tags: [Statistics]
+      summary: "[CONFIRMED] Real-time inverter power — mostly null for Micro-storage devices"
+      description: >
+        [CONFIRMED] reachable but returned a mostly-null template (`status: 99`,
+        `statusDes: "off-line"`) for this Micro-storage device even while genuinely online —
+        this endpoint family is almost certainly intended for standalone Micro-inverter-type
+        devices (a different `deviceType`), not Micro-storage. Untested against an actual
+        Micro-inverter device.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysMicoInverterRealDataMinute/dataSummary:
+    post:
+      operationId: micoInverterDataSummary
+      tags: [Statistics]
+      summary: "[CONFIRMED] Returned null data for this Micro-storage device"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: "OK — `data: null` observed", content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysRevenReport/revenueReport:
+    post:
+      operationId: revenueReport
+      tags: [Statistics]
+      summary: "[FAILING] Revenue report — likely needs date range params (untested)"
+      description: >
+        [FAILING] Calling with just `deviceId` returns the same misleading
+        `"System maintenance in progress"` seen on the dataStatistics endpoints before their
+        date-range requirement was discovered. Likely follows the same
+        `dataType`/`beginTime`/`endTime` convention — untested.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/sysDictDataForDeviceInfo:
+    post:
+      operationId: sysDictDataForDeviceInfo
+      tags: [Reference]
+      summary: "[CONFIRMED] Reachable, no data returned with empty body — likely needs a dict-type param"
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, example: {}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/querySysBanner:
+    post:
+      operationId: querySysBanner
+      tags: [Reference]
+      summary: "[CONFIRMED] Marketing banner list — not device-related"
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, example: {}}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysNotice/sysDeviceRealTime:
+    post:
+      operationId: sysNoticeDeviceRealTime
+      tags: [Devices]
+      summary: "[CONFIRMED] Device fault/alert feed (empty in testing)"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: "OK — `data: []` observed", content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/queryTimeListByPersonNum:
+    post:
+      operationId: queryTimeListByPersonNum
+      tags: [Reference]
+      summary: "[CONFIRMED] Household-size presets for the first-time EMS setup wizard"
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/offGridPort:
+    post:
+      operationId: offGridPort
+      tags: [Untested]
+      summary: "[FAILING/UNTESTED] Likely an off-grid-port control action, not a plain read"
+      description: >
+        Reachable and returns `{code: 200}` with an empty body when called, but not tested with
+        meaningful parameters since it could toggle real off-grid-port hardware state on the
+        live device. Treat as a control action requiring explicit confirmation before use.
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+              example: {deviceId: 14926}
+      responses:
+        '200': {description: OK, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/deviceSetting:
+    post:
+      operationId: deviceSetting
+      tags: [Untested]
+      summary: "[UNTESTED] Likely the device power on/off toggle"
+      description: >
+        Never called live — risk of changing real device power state. Pool strings show fields
+        `isOnlySave`, `controlType` and adjacent UI text about "Device Power On/Off". Do not call
+        without a clear reason and explicit user confirmation.
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deviceId: {type: integer}
+                isOnlySave: {type: integer}
+                controlType: {type: integer}
+              example: {deviceId: 14926, isOnlySave: 0, controlType: 1}
+      responses:
+        '200': {description: Unconfirmed, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
+
+  /app/sysDeviceInfo/deviceSocketSetting:
+    post:
+      operationId: deviceSocketSetting
+      tags: [Untested]
+      summary: "[UNTESTED] Smart-socket / flex-socket energy-saving standby configuration"
+      security: [{accessToken: []}]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties: {deviceId: {type: integer}}
+      responses:
+        '200': {description: Unconfirmed, content: {application/json: {schema: {$ref: '#/components/schemas/ApiEnvelope'}}}}
