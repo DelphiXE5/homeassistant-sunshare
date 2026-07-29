@@ -64,10 +64,12 @@ would look like. Not built yet — this is a plan, not a promise.
   or vice versa, so this should be documented clearly for users in the integration's setup flow.
 
 **Data layer**
-- A `DataUpdateCoordinator` polling `findDeviceListByUserId` (or `findById` for the fuller field
-  set) on a interval — no push/webhook mechanism was found, so this is polling-only. Real device
-  telemetry granularity is limited by what the cloud API itself exposes (see
-  `API_DOCUMENTATION.md` §3 for the fields that were and weren't populated in testing).
+- A `DataUpdateCoordinator` polling `findDeviceListByUserId` on an interval — confirmed this is a
+  genuinely live-updating source (`power`/`consumption`/status flags change between polls; see
+  `API_DOCUMENTATION.md` §3). Direct MQTT was investigated as an alternative to polling and ruled
+  out — the credentials `findById` exposes are real and connectable, but scoped exclusively to the
+  device's own live session; using them would mean permanently fighting the physical device for
+  its own connection (§3a). REST polling is the right approach, no push/webhook path exists.
 - Sensors to expose per device: output wattage (`permPower`), battery SOC limits (`socMin`/`socMax`
   — read-only until §6's write endpoint is solved), online status, RSSI, lifetime
   generation/revenue/CO₂ (`selectInveSummary`).
@@ -83,8 +85,7 @@ would look like. Not built yet — this is a plan, not a promise.
 **Open questions before starting implementation**
 - Confirm the single-session behavior doesn't cause a fight with the mobile app in normal use
   (maybe acceptable if users primarily control via HA).
-- `findDeviceRealStatusByDeviceId`'s null power/consumption fields need investigation — if HA is
-  meant to show live power flow (solar/grid/battery/home, like the app's dashboard), we need to
-  find the actual endpoint or mechanism behind those numbers, since neither tested "real status"
-  endpoint reliably returned them.
 - Rate-limit behavior is unknown — polling interval should be conservative until confirmed safe.
+- Battery SOC control (`updateEmsModeAdvanById`) is still unsolved (§6) — worth resolving before
+  committing to the integration's scope, since "control battery limits" would otherwise have to be
+  cut from v1.
