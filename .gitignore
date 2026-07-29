@@ -12,15 +12,13 @@ __pycache__/
 # macOS
 .DS_Store
 
-# Large / sensitive reverse-engineering artifacts (kept locally only —
-# the .so is a large binary, the bugreport/pcap contain real device +
-# account data from the phone used during analysis)
-libapp.so
-codeinfo.txt
-poolinfo.txt
-applog.txt
-sunshare_bt/
-sunshare_bt.zip
+# Local Claude Code project settings — machine-specific, not for sharing
+.claude/
+
+# Large / sensitive reverse-engineering artifacts (kept locally only — see
+# .reverse_engieneering_data/README.md). Also keeping the general *.pcap
+# pattern as a safety net in case a future capture lands outside that folder.
+.reverse_engieneering_data/
 *.pcap
 
 # Patched/signed APKs produced during the MITM experiment

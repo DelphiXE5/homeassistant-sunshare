@@ -108,14 +108,38 @@ Returns an array of the account's devices with live-ish summary fields:
 }
 ```
 `id` is the numeric `deviceId` used by almost every other endpoint. `sn` is the physical device
-serial (matches the BLE advertised name from the earlier BLE phase). **`power`/`consumption` are
-genuinely live** — confirmed by polling twice a few minutes apart and observing `ss` change value
-(`0` → `1`) while `power`/`consumption` stayed `0.0`; the zeros are very likely an accurate current
-reading (no active solar/battery flow at test time), not a broken/static field. This is the
-recommended endpoint for live power-flow polling in a future integration — no need to chase the
-MQTT route (see §3a) or the broken real-time-session endpoint below for this. `es`/`ss`/`ds` are
-short status flags whose exact meaning wasn't fully confirmed (`ds`=device status, `ss`=solar
-status, `es`=energy-storage status, by naming convention — unconfirmed).
+serial (matches the BLE advertised name from the earlier BLE phase). `es`/`ss`/`ds` are short
+status flags whose exact meaning wasn't fully confirmed (`ds`=device status, `ss`=solar status,
+`es`=energy-storage status, by naming convention — unconfirmed).
+
+**⚠️ `power`/`consumption` liveness — downgraded from an earlier "confirmed live" claim.** The
+original basis for that claim was weak (only `ss` changed value across two polls; `power`/
+`consumption` themselves stayed `0.0` both times, i.e. no positive evidence they ever move). A
+follow-up test on 2026-07-29 during a **verified real event** — the device actively feeding
+~200 W to the grid from battery, confirmed by the account holder watching the physical
+setup — polled `findDeviceListByUserId`, `findBatteryAndDsSsById` (§3b) and
+`findDeviceRealStatusByDeviceId` every 8–15 s for over 4 minutes, plus once with
+`queryOnlineStatusByDeviceIdAndOpenRealTime` opened first: **`power`, `consumption`, and
+`findBatteryAndDsSsById`'s `batPow` stayed at exactly `0` throughout, the entire time real power
+was flowing.** Only `queryMesSettingUpdate`'s `permPower` (`200`) matched the real 200 W —
+but that's the constant-output *target setting*, not an independent measurement.
+
+**Further evidence it's the setting, not a live reading:** the account holder confirmed the app's
+own homescreen "200 W" figure **stayed perfectly fixed** while watched for 30–60 s (no fluctuation
+at all, unlike a real meter), and separately reported that actual physical output dropped to `0`
+once the battery hit its discharge cutoff (`socMin=20%`, §5) — i.e. the true physical output
+changed state (200 W → 0 W) in a way neither the API's `power`/`consumption`/`batPow` fields nor
+(apparently) the app's own displayed number reflected in real time.
+
+**Conclusion: `power`/`consumption` should be treated as *not confirmed live* until further
+notice** — possibly a longer refresh cycle than tested (a 10-minute unattended background poll was
+started to check this — see repo scratch notes/whoever picks this up next), possibly tied to some
+app-side session mechanism not reproduced here (no working traffic-capture method exists for this
+app, see `PHASE2_CAPTURE_GUIDE.md`), or possibly just not wired up for this account/device at all.
+**No confirmed source for a true independent "current power output" or "PV input" reading has been
+found.** The Home Assistant integration's `number` entity (backed by `permPower`) is the closest
+thing to a "current output" value currently available, and it is a target/setting, not a
+measurement — see README.md.
 
 ### `POST app/sysDeviceInfo/findById` ✅
 Body: `{"id": <deviceId>}`
@@ -154,6 +178,30 @@ Returns the **full** device entity — the richest single read call. Notable fie
 **Important:** `permPower` appears both as a top-level column *and* embedded inside the
 `emsModePara` JSON-string. **The top-level column is cosmetic/denormalized — only the value inside
 `emsModePara` (and `emsModeAdvan`) actually drives the physical device.** See §5 for why this matters.
+
+**Fields found only while building the Home Assistant integration, not previously documented, and
+now confirmed dead** — `findById`'s response is far wider than the excerpt above; a full dump
+against the live account (02:22 local time, no PV, presumably no load) also showed:
+```json
+{"soc": 0, "temp1": 0, "socPer": null, "currentPower": null, "totalPower": null,
+ "disStopSoc": null, "chargeStopSoc": null, "onlineStatus": null, "workStatus": null,
+ "onoroffStatus": null, "bcs": null, "batData": null, "packRateWh": null, "inverterP": null,
+ "pe": null}
+```
+By naming convention `soc` looked like the live battery state-of-charge percentage and `temp1` an
+inverter/battery temperature. **Cross-checked live against the app itself the same
+day (2026-07-29): the app showed the battery at 21 % SOC / 0.32 kWh capacity / 23°C, while
+`findById` simultaneously returned `soc: 0`/`temp1: 0`.** The response's own `updateTime` field
+was `2026-07-26 23:35:30` — three days stale — confirming this isn't a transient miss but that
+`findById`'s row is a periodic/event-driven snapshot that these two columns were never wired into.
+**Verdict: `findById.soc`/`findById.temp1` are dead placeholders, not live telemetry — do not use
+them.** Same failure pattern as `findDeviceRealStatusByDeviceId`'s power/consumption (§3 above).
+
+**Resolved — see §3b below.** The endpoint the app actually uses for live battery SOC/capacity/
+temperature is `app/sysDeviceInfo/findBatteryAndDsSsById`, found via string-pool analysis (traffic
+sniffing was tried in an earlier phase and is a dead end — Flutter's bundled TLS trust store blocks
+interception, see `PHASE2_CAPTURE_GUIDE.md`) and confirmed live + correct against the same live
+cross-check (21 % / 23°C) that first exposed `findById.soc`/`temp1` as dead.
 
 Also reveals the device connects to an **Alibaba Cloud IoT MQTT** broker
 (`mqtt-cn-fxf45evy502.mqtt.aliyuncs.com:8883`) — this is almost certainly the real transport that
@@ -207,6 +255,107 @@ per-device credential scoping is designed to prevent.
 channel.** It's a genuine, working MQTT credential, but single-occupancy by design. Stick to the
 REST API (§3's `findDeviceListByUserId`, confirmed to carry live-updating power/status fields) for
 polling, and `updateEmsParaById` (§6) for control.
+
+### 3b. `POST app/sysDeviceInfo/findBatteryAndDsSsById` ✅ — the real live battery telemetry endpoint
+
+Not in the app's confirmed string pool the first time §3 was written — found via a second,
+targeted `strings` pass over `libapp.so` grepping for `pack|batt|soc|temp|realdata`, since traffic
+sniffing (MITM/Frida) is a confirmed dead end for this app (`PHASE2_CAPTURE_GUIDE.md`) and was
+explicitly ruled out again for this follow-up. Also checked: the `iot.sunsharetek.com` and
+`dev.sunsharetek.com` hosts mentioned in §1 as "found in binary, untested" — both are live and
+reachable (HTTP 200), but both reject this account's credentials with `"The username or password
+is incorrect"`, confirming they're either separate environments/accounts or simply not used for
+this account. `web.sunsharetek.com` remains the only working host.
+
+Body: `{"id": <deviceId>}` — same key as `findById`, **not** `deviceId` like most other calls.
+
+```json
+{
+  "code": 200,
+  "data": {
+    "ss": 1,
+    "socPer": "20%",
+    "mapList": [
+      {"packSn": "020625I30020A", "warrantyTime": "2036-06-29", "soc": "20%", "power": "1.50", "temp1": 23}
+    ],
+    "bcs": 0,
+    "currentPower": "0.30",
+    "batPow": 0,
+    "currentDate": "2026-07-29 02:39:22",
+    "bhs": 0,
+    "totalPower": "1.50",
+    "ds": 1
+  }
+}
+```
+
+**Confirmed live/correct at the time this section was first written, two independent ways** (see
+important caveat below though):
+1. `currentDate` is a server-generated timestamp that matched the real wall-clock request time on
+   the first two calls (re-polled 50s apart: `02:38:32` → `02:39:22`, both exactly matching actual
+   request time) — unlike `findById`'s `updateTime`, which sat 3 days stale.
+2. Cross-checked against the app itself the same session: app showed battery **21 % SOC / 0.32 kWh
+   remaining / 23°C**, packSn `020625I30020A`. The API returned `packSn: "020625I30020A"` (exact
+   match), `temp1: 23` (exact match), `soc`/`socPer: "20%"` (same ballpark — plausibly a slightly
+   later/earlier read on a slowly-draining idle battery), and `currentPower: "0.30"` — which is
+   `0.20 × totalPower(1.50)`, i.e. SOC% × rated capacity, matching the app's 0.32 kWh within normal
+   rounding/timing drift.
+
+**⚠️ Caveat found in later testing (same day):** during the extended background poll referenced in
+§3's liveness note, `currentDate` was observed to **repeat the exact same value
+(`2026-07-29 02:53:10`) across two polls 32 seconds apart**, whereas the first test above showed it
+changing within 50 seconds. This is more consistent with **the whole response being server-side
+cached for some interval** (which happens to include `currentDate` at cache-write time) than with
+every call reaching a truly live source — meaning the earlier "confirmed live via `currentDate`"
+conclusion needs qualifying: the endpoint is at least *sometimes* fresher than `findById` (which
+never moved across 3 days), but is not proven to be live on every single call. This is also
+consistent with `batPow`/`power`/`consumption` never moving during the same test window (§3): if
+responses are cached for minutes at a time, a 4-minute poll could easily fall entirely inside one
+cache window and see zero movement regardless of real device activity.
+
+**One field did change, though:** `bhs` flipped from `0` to `2` between the first live-load test
+(§3's `poll_live2.sh` run, ~02:53) and the later background poll (~02:55), right around when the
+account holder reported the battery hitting its `socMin` discharge cutoff. This is the only field
+across all of this testing that has ever been observed to change value, which is reasonably strong
+evidence `bhs` is a real, event-driven status flag (previously guessed as possibly "battery health
+status" — a charge/discharge-inhibited-state flag now seems at least as plausible given the
+timing). Not enough data yet to build a Home Assistant sensor around it with confidence, but worth
+tracking why/when it changes in a future session.
+
+**Testing note:** this second round of live testing was cut short by a `401` (the account's
+single-session-per-account limit, §2, was hit again — the account holder was actively using the
+mobile app to watch the same event) partway through the 10-minute background poll. Further
+testing was paused rather than repeatedly re-logging in and fighting the user's own live app
+session.
+
+**Field meanings — confirmed via the app's own UI tooltip strings found alongside these field names
+in the string pool** (numbered list shown in the app's battery-info dialog):
+- `socPer` = *"State of Charge (%): Average SOC of all batteries"* — average across all packs.
+- `currentPower` = *"Remaining Capacity (kWh): Total estimated energy of all batteries"* — despite
+  the misleading "Power" in the name, this is **capacity in kWh, not instantaneous power**.
+- `totalPower` = *"Rated Capacity (kWh): Sum of all batteries' rated capacity"* — same "Power"
+  naming trap, also kWh not W.
+- `mapList[]` = per-pack breakdown (`packSn`, per-pack `soc`, per-pack `power` [= per-pack rated
+  capacity, kWh], per-pack `temp1` [°C, confirmed]).
+- `batPow` — **not** covered by a tooltip string; by naming convention (and being the one field
+  actually in Watts, distinct from the kWh-but-named-"Power" fields above) this is a plausible
+  candidate for instantaneous battery charge/discharge power. **⚠️ Downgraded after a follow-up
+  test (2026-07-29, see §3's liveness note):** polled every 8–15 s for 4+ minutes during a period
+  the account holder describes as the device actively discharging the battery at ~200 W to the
+  grid — `batPow` stayed at `0` throughout, same flat-zero pattern as `power`/`consumption`. Could
+  mean `batPow` isn't live either, or that true output was already near-zero for the whole test
+  window (the battery was sitting right at its `socMin=20%` cutoff — plausible the discharge had
+  already throttled down before polling started). **Treat as unconfirmed, not "very likely",
+  pending a test during a charge cycle or a discharge caught clearly before cutoff.**
+- `ds`/`ss` — same device-status/solar-status flags seen in `findDeviceListByUserId` (§3).
+- `bcs`/`bhs` — new, no tooltip found; by naming convention possibly "battery charge status" /
+  "battery health status", both `0` at idle/presumably-healthy. Untested further — not surfaced as
+  Home Assistant sensors, too speculative to be useful yet.
+
+This is still the recommended endpoint for battery SOC/temperature/capacity in a Home Assistant
+integration (see README.md) — those fields' liveness is independently confirmed (§3b above) —
+`findById`'s `soc`/`temp1` (§3 above) should not be used. `batPow` is included as a sensor but with
+downgraded confidence per the above.
 
 ### `POST app/sysDeviceInfo/findDeviceRealStatusByDeviceId` ⚠️ power/consumption confirmed dead
 Body: `{"deviceId": <deviceId>}`

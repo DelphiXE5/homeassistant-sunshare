@@ -416,6 +416,97 @@ paths:
                       data:
                         $ref: '#/components/schemas/DeviceDetail'
 
+  /app/sysDeviceInfo/findBatteryAndDsSsById:
+    post:
+      operationId: findBatteryAndDsSsById
+      tags: [Devices]
+      summary: "[CONFIRMED] Live battery pack telemetry — SOC, temperature, capacity, charge/discharge power"
+      description: >
+        [CONFIRMED] Found via string-pool analysis (not reachable via traffic sniffing — Flutter's
+        TLS trust store blocks interception, see PHASE2_CAPTURE_GUIDE.md). Confirmed genuinely live
+        via its own `currentDate` field tracking real request time, and confirmed correct via a
+        live cross-check against the app (`temp1`/`packSn` matched exactly; `socPer` matched within
+        normal drift). Unlike `findById`, uses body key `id` for the device id — same as `findById`
+        itself, but note this differs from most other calls in this API which use `deviceId`.
+        `socPer`/`currentPower`/`totalPower` field meanings are confirmed via the app's own UI
+        tooltip strings (see API_DOCUMENTATION.md §3b) — despite the misleading "Power" naming,
+        `currentPower`/`totalPower` are battery capacity in kWh (remaining/rated), not power.
+        `batPow` is very likely the actual instantaneous charge/discharge power in Watts, but its
+        sign convention is unconfirmed (read 0 at idle). `bcs`/`bhs` are unconfirmed status flags.
+      security: [{accessToken: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id: {type: integer}
+              example: {id: 14926}
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiEnvelope'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          ss: {type: integer, description: "Solar status flag, same as findDeviceListByUserId.ss"}
+                          ds: {type: integer, description: "Device status flag, same as findDeviceListByUserId.ds"}
+                          socPer:
+                            type: string
+                            description: 'Average SOC across all battery packs, e.g. "20%". Confirmed via app UI tooltip.'
+                          currentPower:
+                            type: string
+                            description: 'Total remaining energy across all packs, in kWh despite the field name (e.g. "0.30"). Confirmed via app UI tooltip.'
+                          totalPower:
+                            type: string
+                            description: 'Sum of rated capacity across all packs, in kWh despite the field name (e.g. "1.50"). Confirmed via app UI tooltip.'
+                          batPow:
+                            type: number
+                            description: "Likely instantaneous battery charge/discharge power (W). Sign convention unconfirmed."
+                          bcs: {type: integer, description: "Unconfirmed status flag, possibly battery charge status."}
+                          bhs: {type: integer, description: "Unconfirmed status flag, possibly battery health status."}
+                          currentDate:
+                            type: string
+                            description: "Server timestamp, confirmed to track real request time — proof this endpoint is live."
+                          mapList:
+                            type: array
+                            description: Per battery pack.
+                            items:
+                              type: object
+                              properties:
+                                packSn: {type: string}
+                                warrantyTime: {type: string}
+                                soc: {type: string, description: 'Per-pack SOC, e.g. "20%".'}
+                                power: {type: string, description: "Per-pack rated capacity in kWh despite the field name."}
+                                temp1: {type: number, description: "Per-pack temperature in °C. Confirmed via live cross-check."}
+              example:
+                code: 200
+                msg: success
+                data:
+                  ss: 1
+                  ds: 1
+                  socPer: "20%"
+                  currentPower: "0.30"
+                  totalPower: "1.50"
+                  batPow: 0
+                  bcs: 0
+                  bhs: 0
+                  currentDate: "2026-07-29 02:39:22"
+                  mapList:
+                    - packSn: "020625I30020A"
+                      warrantyTime: "2036-06-29"
+                      soc: "20%"
+                      power: "1.50"
+                      temp1: 23
+
   /app/sysDeviceInfo/findDeviceRealStatusByDeviceId:
     post:
       operationId: findDeviceRealStatusByDeviceId
