@@ -133,19 +133,20 @@ main actor, as requested.
   correct (API_DOCUMENTATION.md §3b). The fifth field, *battery power* (`batPow`), is **not**
   confirmed live (see next point) — kept as a sensor since it's the right unit/identity, but don't
   trust the number yet.
-- *Unconfirmed liveness* (clearly labeled "(raw, unconfirmed)" or documented as such, diagnostic
-  category): `power`/`consumption` from `findDeviceListByUserId`, and `batPow` from
-  `findBatteryAndDsSsById`. Originally thought live; a 2026-07-29 test polling all three every
-  8–15 s for 4+ minutes during a **verified real event** (device discharging the battery at ~200 W
-  to the grid) had **all three stuck at exactly 0 the whole time**. The account holder also
-  confirmed the app's own homescreen wattage figure stays perfectly fixed even while real output
-  changes — strong evidence it's displaying `permPower` (the target setting) rather than a live
-  measurement. **No confirmed source for a true live "current output"/"PV input" reading exists in
-  this API yet.** The integration's `number` entity (`permPower`) remains the closest thing to a
-  "current output" value — it's a setting, not a measurement. **Open task:** if a longer refresh
-  cycle or a charging (not discharging) event ever shows movement in these three fields, promote
-  the relevant one to a primary sensor (rename in `sensor.py`'s `SENSOR_DESCRIPTIONS`, no
-  architecture changes needed) — otherwise this line of investigation may be a dead end.
+- *Confirmed non-functional, kept only as a long-shot diagnostic* (labeled "(raw, unconfirmed)"):
+  `power`/`consumption` from `findDeviceListByUserId`, and `batPow` from `findBatteryAndDsSsById`.
+  Tested across three separate real conditions on 2026-07-29 — idle, an active ~200 W
+  battery-to-grid discharge, and later confirmed ~40 W of real solar generation — and **all three
+  fields read exactly `0` every single time.** This is no longer "pending more testing"; treat
+  these as non-functional for this account via these endpoints (no working traffic-capture method
+  exists to dig further, see `PHASE2_CAPTURE_GUIDE.md`). **No confirmed source for a true live
+  "current output"/"PV input" reading exists in this API.** The integration's `number` entity
+  (`permPower`) remains the closest thing to a "current output" value — and it's a target/setting,
+  not a measurement; interestingly, it was observed drifting on its own (200 → 260 → 230 W over
+  ~2 hours, unprompted) during this same testing session, suggesting some auto-optimization logic
+  recalculates it periodically rather than it being a flat, user-set value — see
+  API_DOCUMENTATION.md §3 for details. This line of investigation is considered closed short of a
+  working traffic capture.
 
 **Not implemented**
 - Battery SOC *limit* control (`updateEmsModeAdvanById`) is still `[FAILING]` in the API (§6, 6

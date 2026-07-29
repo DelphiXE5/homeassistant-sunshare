@@ -28,6 +28,27 @@
   },
   "entity": {
     "sensor": {
+      "pv_power": {
+        "name": "PV input"
+      },
+      "output_power": {
+        "name": "Power output"
+      },
+      "battery_power": {
+        "name": "Battery power"
+      },
+      "load_power": {
+        "name": "Load"
+      },
+      "grid_power": {
+        "name": "Grid power"
+      },
+      "pv1_power": {
+        "name": "PV input (string 1)"
+      },
+      "pv2_power": {
+        "name": "PV input (string 2)"
+      },
       "status": {
         "name": "Status"
       },
@@ -69,15 +90,6 @@
       },
       "battery_rated_capacity": {
         "name": "Battery rated capacity"
-      },
-      "battery_power": {
-        "name": "Battery power"
-      },
-      "raw_power": {
-        "name": "Power (raw, unconfirmed)"
-      },
-      "raw_consumption": {
-        "name": "Consumption (raw, unconfirmed)"
       }
     },
     "number": {

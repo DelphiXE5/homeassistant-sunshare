@@ -28,6 +28,27 @@
   },
   "entity": {
     "sensor": {
+      "pv_power": {
+        "name": "PV-Eingang"
+      },
+      "output_power": {
+        "name": "Ausgangsleistung"
+      },
+      "battery_power": {
+        "name": "Batterieleistung"
+      },
+      "load_power": {
+        "name": "Hausverbrauch"
+      },
+      "grid_power": {
+        "name": "Netzleistung"
+      },
+      "pv1_power": {
+        "name": "PV-Eingang (String 1)"
+      },
+      "pv2_power": {
+        "name": "PV-Eingang (String 2)"
+      },
       "status": {
         "name": "Status"
       },
@@ -69,15 +90,6 @@
       },
       "battery_rated_capacity": {
         "name": "Batterie Nennkapazität"
-      },
-      "battery_power": {
-        "name": "Batterieleistung"
-      },
-      "raw_power": {
-        "name": "Leistung (roh, unbestätigt)"
-      },
-      "raw_consumption": {
-        "name": "Verbrauch (roh, unbestätigt)"
       }
     },
     "number": {

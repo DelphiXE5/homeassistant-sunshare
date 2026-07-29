@@ -131,15 +131,40 @@ once the battery hit its discharge cutoff (`socMin=20%`, §5) — i.e. the true 
 changed state (200 W → 0 W) in a way neither the API's `power`/`consumption`/`batPow` fields nor
 (apparently) the app's own displayed number reflected in real time.
 
-**Conclusion: `power`/`consumption` should be treated as *not confirmed live* until further
-notice** — possibly a longer refresh cycle than tested (a 10-minute unattended background poll was
-started to check this — see repo scratch notes/whoever picks this up next), possibly tied to some
-app-side session mechanism not reproduced here (no working traffic-capture method exists for this
-app, see `PHASE2_CAPTURE_GUIDE.md`), or possibly just not wired up for this account/device at all.
-**No confirmed source for a true independent "current power output" or "PV input" reading has been
-found.** The Home Assistant integration's `number` entity (backed by `permPower`) is the closest
-thing to a "current output" value currently available, and it is a target/setting, not a
-measurement — see README.md.
+**Update 2026-07-29, 08:31 — retested during confirmed real solar generation (~40 W) and now
+effectively closed.** With the account holder confirming genuine, non-trivial solar input
+happening at the moment of the call (not idle, not a discharge-to-cutoff edge case — a third,
+independent real condition), `power`/`consumption` (and `batPow`, §3b) **still read exactly `0`.**
+Across all three tested real conditions now (idle, ~200 W battery discharge, ~40 W solar
+generation), these fields have never once shown a non-zero value. **Conclusion: treat
+`power`/`consumption`/`batPow` as non-functional for this account via these endpoints** — not
+"unconfirmed pending more testing," but as settled a negative result as black-box testing without a
+working traffic-capture method can produce (see `PHASE2_CAPTURE_GUIDE.md` for why MITM isn't
+available here). **No confirmed source for a true independent "current power output" or "PV
+input" reading exists in this API.** The Home Assistant integration's `number` entity (backed by
+`permPower`) remains the closest thing to a "current output" value, and it is a target/setting,
+not a measurement — see README.md. These three fields are kept as diagnostic sensors in the
+integration only on the off chance a much longer/different refresh cadence than tested here
+reveals movement — a tighter, faster-cadence retest (matching the login response's `realTime: 2500`
+hint, §2) was also tried and made no difference (still flat `0`) — don't expect them to ever show
+anything but 0 in practice.
+
+**Side observation while retesting — `permPower` drifted across four checks (200 → 260 → 230 →
+160) over about 2 hours — explained, not mysterious:** the account holder confirmed this is the
+Home Assistant integration's own `number` entity being adjusted (an automation on their end),
+**not** some device/server-side auto-optimization as first guessed here. Correcting that guess:
+`permPower` is exactly the flat, externally-set target it was always documented as (§5/§6) — the
+"drift" was this project's own control loop, observed from the read side without realizing it at
+the time. Doesn't change anything about `power`/`consumption`/`batPow`'s liveness conclusion above,
+which was based on independent direct observation, not on this (mistaken) reasoning.
+
+**Also worth tracking — `findBatteryAndDsSsById`'s `bhs` field changed value again independently**
+(`0` at 06:45 → `2` at 08:31, having earlier gone `0`→`2` around the first discharge-cutoff event
+too). This is now the *second* time `bhs` has changed value across real, independently-verified
+conditions — the strongest evidence yet that it's a genuine live status flag (as opposed to
+`power`/`consumption`/`batPow`, which have never moved once). Its exact meaning is still unknown
+(enum with at least values 0 and 2 seen so far); a promising thread if anyone wants to keep
+correlating it against real device state.
 
 ### `POST app/sysDeviceInfo/findById` ✅
 Body: `{"id": <deviceId>}`
@@ -357,6 +382,173 @@ integration (see README.md) — those fields' liveness is independently confirme
 `findById`'s `soc`/`temp1` (§3 above) should not be used. `batPow` is included as a sensor but with
 downgraded confidence per the above.
 
+### 3c-FINAL. ✅✅✅ FULLY SOLVED & REPLICATED — live power via `systemDiagramUpdate` (AES-encrypted channel)
+
+**This is the definitive answer and it is confirmed working from a standalone script (no app, no
+device-push dependency required beyond an open real-time session).** The app reads live power from
+a **known** `/app/` endpoint that this document had already listed but mis-tested, because the app
+uses an **encrypted request/response channel** that plaintext probing never triggered.
+
+**Endpoint:** `POST /app/app/sysDeviceInfo/systemDiagramUpdate` (polled ~every 2 s by the app).
+
+**Required header:** `encchannel: 1` (plus the usual `Authorization: <access_token>`). Without this
+header the server returns a plaintext empty `{"msg":null,"code":200}` — which is exactly why every
+earlier plaintext test of `systemDiagramUpdate` looked "empty/dead".
+
+**Crypto:** **AES-128-ECB, PKCS7 padding, static key `sunsharesunshare`** (16 ASCII bytes;
+`73756e736861726573756e7368617265`). ECB (no IV) — confirmed by block-analysis (identical plaintext
+blocks → identical ciphertext blocks across responses) and by a known-plaintext key search over the
+iOS `App` binary (the key sits at file offset `0xb170c0`; block 0 decrypts to `{"msg":"success"`).
+The same key/mode is used for both request and response, and for all `encchannel:1` endpoints.
+
+**Request body:** `{"encryptData": "<base64( AES-ECB-encrypt( JSON ) )>"}` where JSON is
+`{"clientId":"GID_sun@@@<sn>","deviceId":<id>}`.
+
+**Response body:** a raw base64 blob (the whole envelope is encrypted). base64-decode → AES-ECB
+decrypt → strip PKCS7 → JSON:
+```json
+{"msg":"success","code":200,"data":{
+  "pvPow":586, "pv1Pow":0, "pv2Pow":586,      // total PV + per-MPPT-string input power (W)
+  "invPow":190,                               // inverter output power (W)
+  "batPow":-396,                              // battery power (W); NEGATIVE = charging, positive = discharging
+  "loadPow":190, "gridPow":0,                 // household load / grid power (W)
+  "soc":45,                                   // battery state-of-charge (%)
+  "energyFlowType":4, "bhs":0, "deviceId":14926,
+  "iPa":null,"iPb":null,"iPc":null,           // per-phase currents (single-phase unit → null)
+  "pvPreal":586,"invPreal":190,"batPreal":-360,
+  "oldPvPow":.., "oldInvPow":.., "oldBatPow":.., "oldLoadPow":..,  // previous sample
+  "time":1785335998675, "clientId":"...", "deviceType":2}}
+```
+
+**Prerequisite:** an open real-time session — call `queryOnlineStatusByDeviceIdAndOpenRealTime`
+(`{"deviceId":<id>}`) first and re-assert it as a keepalive; this makes the device push fresh
+samples that `systemDiagramUpdate` returns. (Subject to the §2 single-session limit — HA will
+contend with the mobile app.)
+
+**Verified end-to-end 2026-07-29** from `sunshare_api.py`-style standalone code: logged in, opened
+the session, sent the encrypted request with `encchannel:1`, and decrypted a live response
+(`pvPow=300, invPow=300, batPow=0, soc=69` — values distinct from the app-capture, i.e. genuinely
+live and independent of the app). **This is directly usable by the Home Assistant integration** —
+it finally provides the three originally-requested live sensors (PV input `pvPow`, current output
+`invPow`, battery power `batPow`) plus SOC/load/grid. See README.
+
+**How this endpoint relates to the plaintext `collect-service` push (below):** the ESP32 device
+POSTs raw telemetry to `collect-service` (unencrypted, §3c-CAPTURE below); the server caches it and
+serves it to the app through the `encchannel:1` `systemDiagramUpdate` read. Two valid data paths now
+exist for a HA integration: (a) this encrypted cloud read (works today, key known), or (b) the local
+plaintext device push. The cloud read is simpler to implement (no LAN/DNS setup) and is the
+recommended default.
+
+---
+
+### 3c-CAPTURE. How the live data was first located — on-device network capture
+
+The question "where does the app get its second-accurate live wattage" is answered, and it is
+**not** in the `/app/` API at all. A packet capture on the customer's own WLAN
+(`.reverse_engieneering_data/wlan-*.eth`, taken while the mobile app was open) shows the
+**inverter's own Wi-Fi module** (`User-Agent: ESP32 HTTP Client/1.0`) POSTing telemetry to a
+completely separate microservice **every ~3 seconds**:
+
+```
+POST https://web.sunsharetek.com/collect-service/collect/emsRealDataMinute/realTimeElectricFlow
+User-Agent: ESP32 HTTP Client/1.0
+Content-Type: application/json         (no Authorization header — device-side ingestion)
+
+{"clientId":"GID_sun@@@020225I1903A0","deviceType":"2","time":1785327128057,
+ "pvPow":86,"pv1Pow":0,"pv2Pow":98,"offGridPow":2,"otherPow":0,"batPow":0,
+ "loadPow":190,"invPow":86,"gridPow":104,"pvPreal":98,"batPreal":1,"invPreal":86,
+ "smtdP":0,"iPa":null,"iPb":null,"iPc":null,"soc":18,"bhs":0}
+```
+Server replies `{"msg":"success","code":200}`. This is **device → server ingestion**, not a read —
+but it hands us the complete, authoritative real-time schema and confirms the values are real
+(`soc:18` matches §3b's live SOC; `loadPow:190` matches `permPower`; two MPPT strings `pv1Pow`/
+`pv2Pow` match the hardware).
+
+**Field mapping (this is the answer to the integration's original three-sensor request):**
+
+| Field | Meaning | Example |
+|---|---|---|
+| `pvPow` | **Total PV / solar input power (W)** — the "PV Input" sensor | 86 |
+| `pv1Pow` / `pv2Pow` | Per-MPPT-string PV power (W) — this device has **2 trackers** | 0 / 98 |
+| `invPow` | **Inverter output power (W)** — the "Current Power Output" sensor | 86 |
+| `batPow` | **Battery power (W)** — the "Battery In/Output" sensor (0 here: at `socMin` cutoff) | 0 |
+| `gridPow` | Grid power (W) | 104 |
+| `loadPow` | Household load (W) | 190 |
+| `offGridPow` | Off-grid-port power (W) | 2 |
+| `otherPow` | Other/unaccounted power (W) | 0 |
+| `pvPreal` / `batPreal` / `invPreal` | Per-source "real" instantaneous readings (W) | 98 / 1 / 86 |
+| `smtdP` | Smart-meter power (W) — 0, no meter accessory | 0 |
+| `iPa` / `iPb` / `iPc` | Per-phase currents (null — single-phase unit) | null |
+| `soc` | Battery state-of-charge (%) | 18 |
+| `bhs` | Battery status flag (seen 0/2 elsewhere) | 0 |
+
+**The app's READ side — found by black-box probing of `collect-service`:**
+`GET https://web.sunsharetek.com/collect-service/collect/emsRealDataMinute/getRealTimeElectricFlow?clientId=<clientId>`
+- Confirmed to exist and to be the right shape: it **requires** query param `clientId` (omitting it
+  → `"Required request parameter 'clientId'"`), and is **GET** (POST → `"Request method 'POST' not
+  supported"`). Sibling verbs `selectRealTimeElectricFlow`/`queryRealTimeElectricFlow`/
+  `lastRealTimeElectricFlow` also exist but take a Long `id` (row-id reads, not useful live).
+- **Why it doesn't (yet) return data for a script — two gates, one of them a Sunshare bug:**
+  1. **The device only pushes while a real-time session is open.** With the app closed and no
+     session, `getRealTimeElectricFlow` returns a bare empty `500` (Redis key absent). The customer's
+     own observation — "this only happens when I open the app" — is exactly this: opening the app
+     starts the ESP32's 3-second upload loop (server → MQTT → device), which is what fills the cache.
+     This also finally explains §3/§3b: every earlier "always 0" test had the app closed, so the
+     device was silent and there was genuinely no live data server-side to read.
+  2. **After `queryOnlineStatusByDeviceIdAndOpenRealTime` (`openRealTime`) is called, the read
+     endpoint changes to a hard server-side error:**
+     `io.lettuce.core.RedisCommandExecutionException: WRONGTYPE Operation against a key holding the
+     wrong kind of value`. This is a **bug in Sunshare's backend** — `getRealTimeElectricFlow` issues
+     a Redis string GET against a key that (in the state a script-opened session leaves it) holds a
+     different Redis type. Not fixable or tunable from the client; no parameter variant avoids it
+     (`deviceType`, `time`, `id`, `deviceId` all identical).
+
+**Trigger CONFIRMED (2026-07-29 12:31, second capture `wlan-129_29.07.26_1231.eth`):** with the
+mobile app **closed**, a script calling `queryOnlineStatusByDeviceIdAndOpenRealTime`
+(`openRealTime`) and re-asserting it every ~3s caused the ESP32 to begin POSTing
+`realTimeElectricFlow` every ~3s for the whole window (`time` values `1785328281948`… land exactly
+inside the 12:31:2x trigger window; live values `pvPow:97, pv2Pow:109, invPow:97`). So
+**`openRealTime` is the trigger** — no real app needed to start the device's push. This also
+retroactively explains every earlier "always 0" result in §3/§3b: those tests had the app closed
+and no session, so the device was silent and the server genuinely had nothing live to serve.
+
+**But the cloud READ path is blocked by a Sunshare server bug.** Even with the device actively
+pushing (verified), during an open session `getRealTimeElectricFlow?clientId=GID_sun@@@…` returns
+`io.lettuce.core.RedisCommandExecutionException: WRONGTYPE`. Diagnostics pin it down precisely: the
+error only occurs for the **exact full `clientId`** (`GID_sun@@@020225I1903A0`) — a truncated/other
+key returns the generic empty error instead — proving the device's data **is** stored in Redis
+under that clientId, but `getRealTimeElectricFlow` issues the wrong Redis command for the key's
+actual type (e.g. a string GET against a hash/list). Not client-fixable; no parameter variant
+(`deviceType`, `time`, `id`, `sn`, alternate clientId forms) avoids it. Every `/app/`-service read
+(`findDeviceRealStatusByDeviceId`, `findDeviceListByUserId`, `findBatteryAndDsSsById`,
+`systemDiagramUpdate`, …) also stays `null`/`0` even during an active push — none of them is wired
+to this Redis cache.
+
+**The decisive practical finding: the ESP32 pushes over plain-text HTTP, not HTTPS.** The captures
+are readable precisely because the device firmware uses `http://web.sunsharetek.com/collect-service/…`
+(User-Agent `ESP32 HTTP Client/1.0`, no TLS, no auth header — only the app's own traffic is
+TLS-pinned). **This makes a fully local, cloud-independent integration feasible without ever
+solving the buggy cloud read:** on the device's LAN, override DNS for `web.sunsharetek.com` (or
+transparently proxy port 80) so the inverter's own 3-second POST bodies are read locally, then
+forwarded upstream unchanged. That yields the complete `pvPow`/`pv1Pow`/`pv2Pow`/`invPow`/`gridPow`/
+`loadPow`/`batPow`/`soc` set every 3s with no session conflict and no dependency on the broken
+`getRealTimeElectricFlow`. The one requirement is that the device must be *pushing*, i.e. a real-time
+session must be kept open — which `openRealTime` does from a script (confirmed), so a small poller
+(or the HA integration) can keep the stream alive while the local proxy harvests it.
+
+**Net conclusion:** the live power-flow data, its full schema, its trigger, and its transport are
+all now known. The cloud read is a dead end (Sunshare Redis bug), but the device's **plaintext-HTTP
+LAN push** is a robust alternative source. Recommended architecture for live power in Home Assistant:
+keep a real-time session open via `openRealTime`, and capture the device's local plaintext POST via
+a DNS/proxy redirect — see README's HA section. Pure-cloud live power is not currently possible for
+this device without Sunshare fixing the `getRealTimeElectricFlow` WRONGTYPE bug.
+
+**Security note (incidental, unrelated to this endpoint):** while brute-scanning read endpoints for
+a value matching the app's display, `purview/userShare/list` was observed returning device-share
+records — including other account holders' email addresses — for `homeId`/`clientId`/`areaId` values,
+i.e. an apparent broken-access-control/IDOR leak on Sunshare's server. Not explored further and no
+data retained; noted here only so it can be reported to Sunshare (responsible disclosure) if desired.
+
 ### `POST app/sysDeviceInfo/findDeviceRealStatusByDeviceId` ⚠️ power/consumption confirmed dead
 Body: `{"deviceId": <deviceId>}`
 
@@ -524,7 +716,7 @@ Body: `{"deviceId": <deviceId>}`. Returns `data.permMap`: an array of 48 half-ho
 each `{"timeStamp": "HH:MM", "power": <watts>}` — the configured default-load-power schedule (all
 `200` in our test, i.e. flat/no time-based schedule active, matching `powerSetPojos: []`).
 
-### `POST app/sysMicoInverterRealDataMinute/realTimePower` ✅ (mostly null for this device)
+### `POST app/sysMicoInverterRealDataMinute/realTimePower` ✅ reachable, empty for this device — deep-dived 2026-07-29
 ### `POST app/sysMicoInverterRealDataMinute/dataStatistics` ✅ (needs params, see below)
 ### `POST app/sysMicoInverterRealDataMinute/dataSummary` ✅ (returned `data: null`)
 ### `POST app/inveRealDataMinute/dataStatistics` ✅ (needs params, see below)
@@ -534,12 +726,60 @@ Body pattern for the two `dataStatistics` endpoints: `{"deviceId": <deviceId>, "
 `{"code":500,"msg":"System maintenance in progress"}` (a misleading generic message — really just a
 missing/unparsed date range). With date params, `dataType` 0/1/3 returned `{"code":200}` with no
 `data` payload (empty result set), `dataType: 2` returned the "System maintenance" error again
-(possibly an invalid enum value). **These endpoints are almost certainly intended for standalone
-"Micro-inverter"-type devices (`deviceType` ≠ 2) rather than this "Micro-storage" device** —
-`realTimePower`'s response was a mostly-null template (`status: 99, statusDes: "off-line"`) even
-though the device itself was online, reinforcing that this endpoint family doesn't apply to
-Micro-storage systems. Likely dead ends for this specific device type; **untested against an actual
-Micro-inverter-type device.**
+(possibly an invalid enum value).
+
+**Deep-dive on `realTimePower`, 2026-07-29 — prompted by a fair challenge: the response schema's
+two PV-string fields (`pv1V`/`pv1C`, `pv2V`/`pv2C`) match this device's actual hardware (2 MPPT
+trackers), so "wrong device family" was worth re-examining harder rather than assuming.**
+
+The response wraps a `newTime` object (suspicious name, but explained below) with a rich field set
+— found by triggering a deliberate type-mismatch error (same trick that found `updateEmsParaById`'s
+wrapper key, §6): sending `"time": "2026-07-29 09:30:00"` (a string) returned a Jackson
+deserialization error naming the real backend class:
+```
+JSON parse error: Cannot deserialize value of type `java.lang.Long` from String "2026-07-29 09:30:00"
+... (through reference chain: com.sunshare.purview.api.domain.SysMicoInverterRealDataMinute["time"])
+```
+This confirms (a) the backend entity is literally called `SysMicoInverterRealDataMinute` — a
+per-minute time-series table — explaining the odd `newTime` wrapper key (it's just this entity
+reused/nested under a field named for its temporal-record nature, not a hidden second parameter);
+(b) `time` is a real, expected field, type `Long` (epoch milliseconds, not a date string).
+
+Full field list revealed by the null template: `pvW` (PV power, W), `gIw`/`gOw` (grid
+import/output W), `lW` (load W), `pv1V`/`pv1C`/`pv2V`/`pv2C` (per-MPPT-string voltage/current),
+`gPw`/`gQw` (grid active/reactive power), `gF` (grid frequency), `bLv`/`bHv` (battery low/high
+voltage?), `rssi`, plus lifetime/cycle totals (`cyclePowerGeneration`, `totaPower`, `totaIncome`,
+`totaCo2`, etc.) — this is exactly the granular PV/inverter telemetry this project has been looking
+for, schema-wise.
+
+**Retested with a correct epoch-millis `time` value, and every device-identifier variant that could
+plausibly be "the missing correct parameter":** `deviceId`, `sn`, `clientId`, each combined with the
+`time` field, plus explicit `deviceType`/`inverterType` hints (`1`, `2`, matching this account's own
+`deviceType: 2`) — **every single combination returned the identical empty template**: `id: 0`
+(no matching database row — `id: 0` is notably different from the *other* null fields, which read
+`null`, not `0`; `id: 0` reads as "primary key of a row that doesn't exist" rather than "field not
+populated"), `status: 99`, `statusDes: "off-line"`. The two sibling endpoints in the same family
+were also retested with a valid date range and are consistently empty too (`dataSummary` →
+`data: null`; `dataStatistics` → `{"code":200}` with no `data` key at all).
+
+**Conclusion: this is not a missing/wrong-parameter problem — it's zero rows for this `deviceId` in
+this specific backend table, confirmed across every identifier/type combination tried.** The
+schema match to this device's real MPPT hardware is a fair observation and made this worth
+re-testing properly (rather than re-asserting the earlier guess), but the evidence now points to a
+**backend data-pipeline/business-classification split**: Sunshare's backend likely never writes
+this device's telemetry into `SysMicoInverterRealDataMinute` at all — regardless of the physical
+hardware being a good match, the "Micro-storage" product line (§3's `deviceType: 2`) appears to be
+routed to a completely different (and, per §3/§3b's exhaustive live testing, apparently
+non-populated) telemetry path. **Still untested: an actual standalone Micro-inverter-type account**,
+which would conclusively prove whether this table is populated at all for anyone, or is dead
+company-wide.
+
+**➜ Superseded/confirmed by §9b:** the request DTO has since been fully enumerated (52 fields) and
+the device-key question settled — `sn`/`inverterSn`/`commSn`/`packSn` are not fields of this entity
+at all, only `deviceId`/`id`/`clientId`/`userId` are, and all four fail identically. §9b also
+identifies the table that *does* hold this device's rows (`SysInveRealDataMinute`, which has
+`power`/`batPow`/`temp1`/`permPower` columns) and proves no real-time route exists on it. Read §9b
+instead of re-deriving any of this.
 
 ### `POST app/sysRevenReport/revenueReport` ⚠️
 Body `{"deviceId": <deviceId>}` alone → `{"code":500,"msg":"System maintenance in progress"}` (same
@@ -564,6 +804,183 @@ this the hard way. No known legitimate use case found for this endpoint from the
 | `app/sysNotice/sysDeviceRealTime` ✅ | `{"deviceId": ...}` | Returned `data: []` (empty) — presumably a fault/alert feed. |
 | `app/sysDeviceInfo/queryTimeListByPersonNum` ✅ | `{"deviceId": ...}` | Returns household-size presets (`emsPersonType`, `timeAll`: array of `timePerion` strings like `"22:00-06:00"`) used for the "first EMS setup by person count" wizard. |
 | `app/sysDeviceInfo/offGridPort` ✅ | `{"deviceId": ...}` | Returns `{"code":200}` with no data — likely a control/toggle action, not a read; **not tested with meaningful params** since it could change real device state (off-grid port enable). |
+
+## 9a. Static-analysis search for a hidden "real live power" endpoint — negative result
+
+Prompted by the confirmed-dead `power`/`consumption`/`batPow` fields (§3/§3b): if the app's own
+homescreen shows numbers that (per the account holder) change over longer intervals, *some* code
+path in the app must be fetching that data — so `libapp.so` was searched again, specifically for
+anything not yet cataloged. Traffic capture remains off the table (confirmed dead end, see
+`PHASE2_CAPTURE_GUIDE.md`), so this was string-pool analysis only — no disassembly, since Blutter
+(the standard Dart-AOT decompiler) already failed against this arm32 build (`PHASE1_FINDINGS.md`).
+
+**Ruled out:**
+- **Push/notification SDKs** (Firebase/FCM, GeTui/个推, JPush, UMeng, Aliyun Cloud Push) — none
+  found. The app isn't receiving live telemetry via a push side-channel.
+- **IoT thing-model / device-shadow calls** (Aliyun LinkKit-style `getProperty`/`thingModel`
+  naming) — none found, consistent with §3a's conclusion that the app never talks to the Aliyun
+  IoT broker directly.
+- **A hidden host or URL** — the full `https://` string list in the binary is exactly the three
+  known hosts (`web`/`iot`/`dev.sunsharetek.com`, §1), nothing else. No separate real-time backend.
+- **A dedicated "Micro-storage real data" REST path** — searched every `app/.../.../` path string
+  in the binary (the complete list matches what's already documented here); nothing exists beyond
+  the endpoints already cataloged in this file.
+
+**What *was* found — a real "real-time data" concept exists for this device type in the app, but
+with no separate backing endpoint:** a whole cluster of Dart source-path strings —
+`package:sunshare/biz/device/models/micro_storage_real_data_entity.dart`,
+`package:sunshare/generated/json/micro_storage_real_data_entity.g.dart` (generated JSON
+(de)serialization), `getMicroStorageRealData()`/`stopMicroStorageRealData()` functions, and —
+notably — a whole **debug page family**: `micro_storage_debug_main_page.dart`,
+`micro_storage_ems_setting_page.dart`, and `micro_storage_real_time_page.dart`, all under
+`package:sunshare/biz/device/page/debug/`. This confirms Sunshare's developers built (at least) a
+debug view specifically for live Micro-storage telemetry. But since no distinct URL string backs
+it, `getMicroStorageRealData()` almost certainly just calls one of the endpoints already documented
+here (`findDeviceListByUserId` is the best guess — its response already contains exactly the short
+field names — `power`, `consumption`, `es`, `ss`, `ds` — this entity would need) and deserializes
+the same (confirmed dead) fields into a nicer-named Dart object. **This is a negative result that
+reinforces §3/§3b's conclusion rather than opening a new lead:** there does not appear to be a
+secret, separate, working live-data endpoint hiding in the app.
+
+**A separate, unrelated family also found:** `WnRealTimePowerEntity`, `WnRealDataMainEntity`,
+`WnStatisticsEntity`, etc. (`Wn` ≈ "微逆", *Wēi Nì*, Chinese for "micro-inverter") with per-phase
+fields (`powerA`/`powerB`/`powerC`) — these back the standalone 3-phase **Micro-inverter** device
+type (`deviceType` ≠ 2), i.e. `sysMicoInverterRealDataMinute/*` (§7). Not applicable to our
+Micro-storage unit — matches the existing conclusion in §7 that those endpoints are for a different
+hardware family.
+
+**One remaining, non-technical option, if anyone wants to keep pulling this thread:** the debug
+page family above suggests the app may have a hidden debug menu (common Flutter pattern: tapping a
+version/build number several times). If the account holder can find and open it in the actual app,
+it might display more granular values than the homescreen — but without a working traffic-capture
+method, there's no way to confirm *which* call populates it, so this would only be useful as another
+data point for manual cross-checking (like the homescreen number already was), not as a way to find
+a new endpoint.
+
+## 9b. Backend introspection — two new oracles, and the actual answer on live power
+
+§9a's app-side search came up empty. This section documents a second attempt that **did** produce
+hard structural answers — not from the app binary, but from the backend's own error handling.
+
+### 9b.1 Failed first: object-pool proximity analysis ❌ (documented so nobody retries it)
+
+The theory was that Dart AOT lays out string literals in compilation order, so a request-body key
+would sit physically next to its endpoint URL in the pool (the story behind the original
+`mesSettingUpdatePojo` find, §6). **Tested and disproven:** extracting all 58 900 pool strings with
+byte offsets and dumping the 50 neighbours of `app/sysDeviceInfo/updateEmsParaById` — a case where
+we *know* the answer — yields only unrelated Flutter internals, image assets and localization
+strings. The pool is globally deduplicated/reordered, not compilation-ordered. **Proximity analysis
+is useless on this snapshot; the earlier find was luck, not method.**
+
+### 9b.2 Oracle A — Jackson type-mismatch as a DTO field/type enumerator ✅
+
+Sending a field with a deliberately impossible JSON type (an array where any scalar is expected)
+distinguishes bound from unknown fields, because Spring/Jackson is configured to *ignore* unknown
+properties but *error* on type mismatches:
+
+| Request | Response |
+|---|---|
+| `{"deviceId": []}` | `code:500`, `msg:"JSON parse error: Cannot deserialize value of type `java.lang.Long` … through reference chain: com.sunshare.purview.api.domain.<Entity>[\"deviceId\"]"` |
+| `{"zzzNotAFieldXyz": []}` | no error at all |
+
+This yields, for **any** endpoint: the bound backend entity's fully-qualified class name, its exact
+field names, and each field's Java type. It works on every route tested and needs nothing but HTTP.
+
+### 9b.3 Oracle B — 404 vs. 200/500 as a route-existence probe ✅
+
+A non-existent route returns a bare **HTTP 404** with no JSON envelope, while every real route
+returns HTTP 200 (with `code` 200 or 500 inside). So undocumented endpoint names can be brute-forced
+by name. Validated against a known-good and two known-bogus paths.
+
+Also settled with Oracle B: **`"System maintenance in progress"` is not a maintenance flag** — it's
+this backend's generic uncaught-exception message. Proven by `sysRevenReport/revenueReport`, which
+returns it with `{"deviceId"}` alone but a clean `code:200` once `dataType`+`beginTime`+`endTime` are
+added. Treat it as "handler threw", usually a missing/unusable parameter.
+
+### 9b.4 Result: `realTimePower` cannot serve this device, and here is the proof
+
+Enumerating `sysMicoInverterRealDataMinute/realTimePower`'s request DTO gave **52 bound fields on
+`com.sunshare.purview.api.domain.SysMicoInverterRealDataMinute`** — the entire response schema is
+also accepted as *input* (the route binds request and response to the same entity). Critically, of
+every plausible device key, **only `deviceId` (Long), `id` (long), `clientId` (String) and
+`userId` (Long) are bound** — `sn`, `inverterSn`, `commSn`, `packSn` and `homeId` are **not fields
+of this entity at all**. All four bindable keys were tried, alone and combined, with a valid
+epoch-millis `time` and with `deviceType`/`inverterType` hints: every single one returns the same
+empty template (`id: 0`, `status: 99`, `statusDes: "off-line"`).
+
+**So the earlier "wrong device family" conclusion (§7) was right, but for a better reason than the
+MPPT-count argument suggested** — and the fair objection that this device really does have 2 MPPT
+trackers is answered: the schema fits the hardware, but the *table* doesn't contain this device.
+This device's per-minute rows live in a **different table**:
+
+| Route family | Bound entity | Has our device's data? |
+|---|---|---|
+| `app/sysMicoInverterRealDataMinute/*` | `SysMicoInverterRealDataMinute` | ❌ no rows, any key |
+| `app/inveRealDataMinute/*` | **`SysInveRealDataMinute`** | ✅ yes — `selectInveSummary` returns real, growing totals |
+
+And `SysInveRealDataMinute`'s own DTO enumeration shows it has exactly the columns this project
+wanted: **`power` (Double), `batPow` (int), `temp1` (int), `permPower` (int), `totalPower` (double),
+`bhs` (int), `pe` (int)**, plus `sn`/`packSn`/`homeId` (which the Mico entity lacks).
+
+**But there is no real-time read route on that family.** Oracle B was used to brute-force 22
+plausible names (`realTimePower`, `realTimeData`, `selectRealTime`, `latestData`, `selectMinuteData`,
+…) under `app/inveRealDataMinute/` — **all 404**. That matches the app binary's own complete path
+inventory (§9a), which contains exactly three `inveRealDataMinute` routes: `selectInveSummary`,
+`energyPlanStatistics`, `dataStatistics`. Of those, `dataStatistics` throws the generic exception for
+**every** parameter combination tried (all `dataType` 0–7, six date formats, `time`/`timeValue`
+sweeps, `sn`/`homeId`/pagination variants) while its sibling routes accept the same shapes — so the
+per-minute history is not reachable through it either, at least not from this account.
+
+### 9b.5 Why `power`/`consumption` are structurally always 0 — best explanation yet
+
+`findDeviceListByUserId` and `findDeviceRealStatusByDeviceId` do **not** bind `SysDeviceInfo` like
+the other device routes — they bind **`com.sunshare.purview.api.domain.HomeLoadPower`**. Enumerating
+it is revealing:
+
+- It has a bound `homeLoadPower` (double) field that has **never appeared in any response** we've
+  captured (Jackson omits nulls) — plus `homeId`, `userId`, `timeStamp`, likewise never seen.
+- **`power` and `consumption` are *not* bindable fields of it** — yet they appear in its responses.
+  A property that serializes but won't deserialize is a **getter-only/derived value**, i.e. computed
+  by the service layer rather than read from this entity's table.
+
+The entity being named *HomeLoadPower* — combined with `queryMesSettingUpdate`'s
+`homeLoadSource: 4`, `meterList: null`, `socketList: null` (§5) and this device having
+`meterSn`/`socketSn`/`meterStatus`/`meterHave` all `null` (§3's `findById`) — points to a concrete
+conclusion: **`power`/`consumption` are home-load figures sourced from a smart meter or smart socket
+accessory, and this installation has neither, so they are structurally 0 rather than broken.**
+That is consistent with every observation to date, including the ~200 W and ~40 W tests, and it
+means no amount of parameter-guessing will make them report inverter output.
+
+`batPow` reading 0 during the ~40 W solar test is also physically consistent under this reading: the
+battery sat at 19 % SOC against a `socMin` of 20 %, i.e. below its discharge cutoff and not
+charging much, so near-zero *battery* power is plausibly correct — `batPow` may well be a genuine
+live field that simply had nothing to report. Worth one more check during a clear charge cycle.
+
+### 9b.6 Bonus: `dayPower` is confirmed working ✅
+
+`selectInveSummary` now returns `dayPower: 0.2` (kWh today) and `totalAllPower` grew 19.5 → 23.6 kWh
+across the session — this endpoint *does* track real production, just as accumulated energy rather
+than instantaneous power. The Home Assistant integration already exposes both
+(`today_energy`/`lifetime_energy`), so **daily/lifetime yield is properly covered**; only
+instantaneous wattage is missing.
+
+### 9b.7 What is left
+
+The app displays an instantaneous wattage that no enumerated REST field reproduces. Given §9a
+(no push SDK, no MQTT client, no hidden host, no extra route in the binary) and §9b (no bound field
+that could carry it, no reachable per-minute route), the remaining possibilities are:
+1. The app derives it client-side — e.g. from `permPower` plus `energyPlanStatistics`'s 48-slot
+   `permMap`, both of which track the *setting*, and the account holder did confirm the app's figure
+   stays fixed over short windows.
+2. It comes from a route bound to a field whose name is not among the ~90 candidates probed. A full
+   dictionary sweep of `app/<module>/<name>` using Oracle B could close this off definitively — the
+   module list is already known from the binary.
+3. A real-time cache path that only fills under conditions not reproducible from a script.
+
+The cleanest remaining experiment needs no reverse engineering at all: poll continuously for a few
+minutes **while watching the app side by side**, and check whether the app's number moves at all
+during a period when our polls are flat. If it does not move, option 1 is proven and the question is
+closed.
 
 ## 10. Found in binary, never called — ❔ untested
 

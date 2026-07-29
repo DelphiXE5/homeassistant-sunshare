@@ -1,35 +1,28 @@
 """Sensors for the Sunshare integration.
 
 Three groups:
-- Confirmed fields (status, RSSI, firmware, SOC limits, lifetime stats) —
-  safe to treat as "the real thing".
-- Battery fields (`battery_soc`, `battery_temperature`,
-  `battery_rated_capacity`, `battery_remaining_capacity`, `battery_power`)
-  come from `app/sysDeviceInfo/findBatteryAndDsSsById`, found via string-pool
-  analysis (not in the original API_DOCUMENTATION.md). SOC/temperature/
-  capacity are confirmed live + correct: its `currentDate` tracks real
-  request time, and SOC/temperature matched an exact live app cross-check
-  (see API_DOCUMENTATION.md §3b). `battery_power` (`batPow`) is NOT
-  confirmed live — a 2026-07-29 test during a verified ~200 W battery
-  discharge event had it stuck at 0 the whole time, same as `raw_power`/
-  `raw_consumption` below. Kept as a sensor (plausible candidate, right
-  unit/identity) but don't trust it yet.
-- `raw_power`/`raw_consumption` — thought to be live originally, but a
-  2026-07-29 test (polled every 8-15s for 4+ minutes during a verified
-  ~200 W battery-to-grid discharge) had both stuck at exactly 0 throughout.
-  **No confirmed source for a true live "current output"/"PV input"
-  reading exists yet** — the account holder also confirmed the app's own
-  homescreen wattage figure stays perfectly fixed even while real output
-  changes, meaning it's most likely displaying `permPower` (the target
-  setting, see `number.py`) rather than a live measurement. Kept as
-  diagnostic sensors in case a longer refresh cycle or different condition
-  (e.g. charging) reveals movement — watch these in HA's history.
+- Live power flow (`pv_power`, `pv1_power`, `pv2_power`, `output_power`,
+  `battery_power`, `load_power`, `grid_power`) from the encrypted
+  `systemDiagramUpdate` read (AES-128-ECB, header `encchannel: 1`, gated on an
+  open real-time session — see API_DOCUMENTATION.md §3c-FINAL and
+  `coordinator.py`). These are the three originally-requested sensors: PV input
+  (`pvPow`), current power output (`invPow`), battery in/out (`batPow`,
+  NEGATIVE = charging, positive = discharging). They report `None` (become
+  "unavailable"), not 0, whenever the device isn't pushing — typically the
+  first poll right after opening the session, or while the mobile app holds the
+  single allowed session (§2).
+- Confirmed static/slow fields (status, RSSI, firmware, SOC limits, lifetime
+  stats) — safe to treat as "the real thing".
+- Battery pack fields (`battery_soc`, `battery_temperature`,
+  `battery_rated_capacity`, `battery_remaining_capacity`) from
+  `app/sysDeviceInfo/findBatteryAndDsSsById`, confirmed live + correct: its
+  `currentDate` tracks real request time, and SOC/temperature matched an exact
+  live app cross-check (see API_DOCUMENTATION.md §3b).
 
-`findById`'s `soc`/`temp1` fields were tried first (before
-`findBatteryAndDsSsById` was found) but are dead placeholders — its
-`updateTime` doesn't move and its values didn't match reality — so they are
-deliberately not surfaced here. See API_DOCUMENTATION.md for the full
-writeup.
+The old `findDeviceListByUserId.power/consumption` and `findById.soc/temp1`
+fields were confirmed dead (always 0 / stale placeholders) and are gone —
+`systemDiagramUpdate` is the real live source. See API_DOCUMENTATION.md §3c
+for the full writeup.
 """
 from __future__ import annotations
 
@@ -63,6 +56,65 @@ class SunshareSensorDescription(SensorEntityDescription):
 
 
 SENSOR_DESCRIPTIONS: tuple[SunshareSensorDescription, ...] = (
+    # --- Live power flow (systemDiagramUpdate) — see module docstring ---
+    SunshareSensorDescription(
+        key="pv_power",
+        translation_key="pv_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.pv_power_w,
+    ),
+    SunshareSensorDescription(
+        key="output_power",
+        translation_key="output_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.output_power_w,
+    ),
+    SunshareSensorDescription(
+        key="battery_power",
+        translation_key="battery_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.battery_power_w,
+    ),
+    SunshareSensorDescription(
+        key="load_power",
+        translation_key="load_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.load_power_w,
+    ),
+    SunshareSensorDescription(
+        key="grid_power",
+        translation_key="grid_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.grid_power_w,
+    ),
+    SunshareSensorDescription(
+        key="pv1_power",
+        translation_key="pv1_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.pv1_power_w,
+    ),
+    SunshareSensorDescription(
+        key="pv2_power",
+        translation_key="pv2_power",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda d: d.pv2_power_w,
+    ),
     SunshareSensorDescription(
         key="status",
         translation_key="status",
@@ -169,33 +221,6 @@ SENSOR_DESCRIPTIONS: tuple[SunshareSensorDescription, ...] = (
         native_unit_of_measurement="kWh",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda d: d.battery_rated_capacity_kwh,
-    ),
-    SunshareSensorDescription(
-        key="battery_power",
-        translation_key="battery_power",
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        value_fn=lambda d: d.battery_power_w,
-    ),
-    # --- Raw / unconfirmed fields — see module docstring ---
-    SunshareSensorDescription(
-        key="raw_power",
-        translation_key="raw_power",
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.raw_power,
-    ),
-    SunshareSensorDescription(
-        key="raw_consumption",
-        translation_key="raw_consumption",
-        device_class=SensorDeviceClass.POWER,
-        state_class=SensorStateClass.MEASUREMENT,
-        native_unit_of_measurement=UnitOfPower.WATT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda d: d.raw_consumption,
     ),
 )
 

@@ -19,25 +19,27 @@ _LOGGER = logging.getLogger(__name__)
 class SunshareDevice:
     """Merged view of one device across the endpoints we poll.
 
-    `battery_*` fields come from `findBatteryAndDsSsById` instead — confirmed
-    live (its `currentDate` tracks real request time) and confirmed correct
-    (`battery_temp_c`/`battery_soc_percent` matched a live app cross-check
-    exactly; `battery_rated_capacity_kwh`/`battery_remaining_capacity_kwh`
-    match the app's own tooltip strings for `totalPower`/`currentPower`, see
-    API_DOCUMENTATION.md §3b). `battery_power_w` (`batPow`) is a plausible
-    but NOT confirmed candidate for instantaneous charge/discharge power —
-    it stayed at 0 through a 4+ minute test during an active ~200 W
-    discharge event, the same flat-zero pattern seen on `raw_power`/
-    `raw_consumption` below, so treat it with the same caution.
+    Live power fields (`pv_power_w`, `pv1/pv2_power_w`, `output_power_w`,
+    `battery_power_w`, `load_power_w`, `grid_power_w`) come from the encrypted
+    `systemDiagramUpdate` read (AES-128-ECB, header `encchannel: 1`, gated on
+    an open real-time session) — the definitive live source, verified
+    end-to-end from standalone code (API_DOCUMENTATION.md §3c-FINAL). These are
+    the three originally-requested sensors: PV input (`pvPow`), current output
+    (`invPow`), battery flow (`batPow`, NEGATIVE = charging). They read `None`
+    (not 0) whenever the device isn't currently pushing — e.g. the very first
+    poll right after the session is opened, or while the mobile app has taken
+    the single allowed session (§2).
 
-    `raw_power`/`raw_consumption` mirror `findDeviceListByUserId` fields
-    that were originally thought to be live but are now unconfirmed: a
-    2026-07-29 test polled them every 8-15s for 4+ minutes during a verified
-    ~200 W battery-to-grid discharge event and both stayed at exactly 0 the
-    entire time. `findById`'s `soc`/`temp1` were tried too but confirmed
-    *dead* (its `updateTime` doesn't move, and real values didn't match
-    reality — see API_DOCUMENTATION.md) so they are deliberately not
-    surfaced here at all.
+    Battery pack fields (`battery_soc_percent`, `battery_temp_c`,
+    `battery_*_capacity_kwh`) come from `findBatteryAndDsSsById` — confirmed
+    live (its `currentDate` tracks real request time) and correct (SOC/temp
+    matched a live app cross-check exactly; capacities match the app's own
+    tooltip strings for `totalPower`/`currentPower`, see §3b).
+
+    Note: the old `findDeviceListByUserId.power/consumption` and
+    `findById.soc/temp1` fields were confirmed *dead* (always 0 / stale
+    placeholders across three real conditions on 2026-07-29) and are
+    deliberately not surfaced — `systemDiagramUpdate` replaces them.
     """
 
     id: int
@@ -54,13 +56,17 @@ class SunshareDevice:
     perm_power: int | None
     soc_min: int | None
     soc_max: int | None
-    raw_power: float | None
-    raw_consumption: float | None
+    pv_power_w: float | None
+    pv1_power_w: float | None
+    pv2_power_w: float | None
+    output_power_w: float | None
+    battery_power_w: float | None
+    load_power_w: float | None
+    grid_power_w: float | None
     battery_soc_percent: float | None
     battery_temp_c: float | None
     battery_rated_capacity_kwh: float | None
     battery_remaining_capacity_kwh: float | None
-    battery_power_w: float | None
     lifetime_energy_kwh: float | None
     lifetime_energy_unit: str | None
     today_energy_kwh: float | None
@@ -94,8 +100,9 @@ class SunshareDataUpdateCoordinator(DataUpdateCoordinator[dict[int, SunshareDevi
                     self.client.async_get_summary(device_id),
                     self.client.async_get_battery_status(device_id),
                 )
+                flow = await self._async_get_live_flow(device_id, device.get("sn"))
                 result[device_id] = _merge_device(
-                    device, detail, mes_setting, summary, battery
+                    device, detail, mes_setting, summary, battery, flow
                 )
             return result
         except SunshareAuthError as err:
@@ -103,9 +110,30 @@ class SunshareDataUpdateCoordinator(DataUpdateCoordinator[dict[int, SunshareDevi
         except SunshareApiError as err:
             raise UpdateFailed(f"Sunshare API error: {err}") from err
 
+    async def _async_get_live_flow(
+        self, device_id: int, sn: str | None
+    ) -> dict:
+        """Trigger + read the encrypted live power flow, best-effort.
+
+        The live read depends on the device currently pushing (an open
+        real-time session, which also contends with the mobile app for the
+        single allowed session). A failure here must not fail the whole
+        update — the confirmed fields still poll fine — so any error just
+        yields empty live values for this cycle.
+        """
+        if not sn:
+            return {}
+        try:
+            await self.client.async_open_realtime(device_id)
+            return await self.client.async_get_live_flow(device_id, sn)
+        except SunshareApiError as err:
+            _LOGGER.debug("Live flow unavailable for device %s: %s", device_id, err)
+            return {}
+
 
 def _merge_device(
-    device: dict, detail: dict, mes_setting: dict, summary: dict, battery: dict
+    device: dict, detail: dict, mes_setting: dict, summary: dict, battery: dict,
+    flow: dict,
 ) -> SunshareDevice:
     mes_pojo = mes_setting.get("mesSettingUpdatePojo") or {}
     ems_advan = mes_setting.get("emsModeAdvan") or {}
@@ -128,13 +156,17 @@ def _merge_device(
         perm_power=mes_pojo.get("permPower"),
         soc_min=ems_advan.get("socMin"),
         soc_max=ems_advan.get("socMax"),
-        raw_power=device.get("power"),
-        raw_consumption=device.get("consumption"),
+        pv_power_w=_as_float(flow.get("pvPow")),
+        pv1_power_w=_as_float(flow.get("pv1Pow")),
+        pv2_power_w=_as_float(flow.get("pv2Pow")),
+        output_power_w=_as_float(flow.get("invPow")),
+        battery_power_w=_as_float(flow.get("batPow")),
+        load_power_w=_as_float(flow.get("loadPow")),
+        grid_power_w=_as_float(flow.get("gridPow")),
         battery_soc_percent=_as_percent(battery.get("socPer")),
         battery_temp_c=_as_float(battery_pack.get("temp1")),
         battery_rated_capacity_kwh=_as_float(battery.get("totalPower")),
         battery_remaining_capacity_kwh=_as_float(battery.get("currentPower")),
-        battery_power_w=_as_float(battery.get("batPow")),
         lifetime_energy_kwh=summary.get("totalAllPower"),
         lifetime_energy_unit=summary.get("totalAllPowerUnit"),
         today_energy_kwh=summary.get("dayPower"),
