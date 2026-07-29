@@ -82,12 +82,17 @@ platforms).
 **Option A — HACS (custom repository)**
 
 This repo isn't in the default HACS store (it's a private/internal reverse-engineered integration,
-not something to submit there) — add it as a HACS **custom repository** instead:
+not something to submit there) — add it as a HACS **custom repository** instead. Read the AI-slop
+warning at the top of this file before doing this on a real HA instance.
+
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=DelphiXE5&repository=homeassistant-sunshare&category=integration)
+
+That button requires the [My Home Assistant](https://www.home-assistant.io/integrations/my/)
+integration and HACS already installed, and opens the "add custom repository" dialog pre-filled.
+Manually, the same thing:
 
 1. HACS → the "⋮" menu (top right) → **Custom repositories**.
-2. Repository: `https://github.com/<owner>/<repo>` (replace with wherever this repo ends up once
-   pushed — see the AI-slop warning above before doing this on a real HA instance). Category:
-   **Integration**.
+2. Repository: `https://github.com/DelphiXE5/homeassistant-sunshare`, category **Integration**.
 3. Find "Sunshare" in HACS → **Download**.
 4. Restart Home Assistant.
 5. **Settings → Devices & Services → Add Integration → Sunshare**, enter your Sunshare account
