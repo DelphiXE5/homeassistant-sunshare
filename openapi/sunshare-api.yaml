@@ -30,6 +30,17 @@ info:
     Only one login session is valid per account at a time. Logging in again (e.g. from the
     mobile app) invalidates any other active token.
 
+    ### Direct MQTT? (investigated, not viable)
+    `findById` exposes what look like ready-to-use Alibaba Cloud IoT MQTT connect parameters
+    (`endPoint`, `clientId`, `userName`, `password`). Live-tested (with explicit sign-off, since it
+    touches a real device's cloud session): the credentials genuinely work with a standard MQTT
+    client, but auth is scoped to that exact `clientId` — no alternate, non-colliding identity is
+    authorized (`rc=5` on any variant tried). This client ID is the device's own live session,
+    confirmed by a reconnect-fight (~every 1.5-2s) when held open. **Do not build anything
+    long-running on this channel** — a one-off connect is a brief, self-recovering blip, but
+    sustained use means permanently fighting the physical device for its own connection. Use the
+    REST API for both polling and control. Full writeup: `API_DOCUMENTATION.md` §3a.
+
     ### Intended use
     This spec is a step toward a future Home Assistant custom integration (see repo README) —
     it documents exactly the calls such an integration would need for sensor polling

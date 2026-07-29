@@ -108,10 +108,14 @@ Returns an array of the account's devices with live-ish summary fields:
 }
 ```
 `id` is the numeric `deviceId` used by almost every other endpoint. `sn` is the physical device
-serial (matches the BLE advertised name from the earlier BLE phase). `power`/`consumption`/`es` were
-`0.0`/`0` in our tests (device state at the time); `es`/`ss`/`ds` are short status flags whose exact
-meaning wasn't fully confirmed (`ds`=device status, `ss`=solar status, `es`=energy-storage status, by
-naming convention — unconfirmed).
+serial (matches the BLE advertised name from the earlier BLE phase). **`power`/`consumption` are
+genuinely live** — confirmed by polling twice a few minutes apart and observing `ss` change value
+(`0` → `1`) while `power`/`consumption` stayed `0.0`; the zeros are very likely an accurate current
+reading (no active solar/battery flow at test time), not a broken/static field. This is the
+recommended endpoint for live power-flow polling in a future integration — no need to chase the
+MQTT route (see §3a) or the broken real-time-session endpoint below for this. `es`/`ss`/`ds` are
+short status flags whose exact meaning wasn't fully confirmed (`ds`=device status, `ss`=solar
+status, `es`=energy-storage status, by naming convention — unconfirmed).
 
 ### `POST app/sysDeviceInfo/findById` ✅
 Body: `{"id": <deviceId>}`
@@ -153,16 +157,66 @@ Returns the **full** device entity — the richest single read call. Notable fie
 
 Also reveals the device connects to an **Alibaba Cloud IoT MQTT** broker
 (`mqtt-cn-fxf45evy502.mqtt.aliyuncs.com:8883`) — this is almost certainly the real transport that
-pushes settings to hardware; the REST API is a thin control-plane in front of it.
+pushes settings to hardware; the REST API is a thin control-plane in front of it. See §3a for a full
+writeup of a live test connecting directly to this broker — short answer: it works, but isn't usable
+for a sustained integration.
 
-### `POST app/sysDeviceInfo/findDeviceRealStatusByDeviceId` ✅ (partial)
+### 3a. Can a third party connect directly to the device's Alibaba Cloud IoT MQTT broker? ⚠️ Tested live — not viable
+
+Investigated because `findById` exposes what look like ready-to-use MQTT connect parameters:
+`endPoint` (`mqtt-cn-fxf45evy502.mqtt.aliyuncs.com:8883`), `clientId`
+(`GID_sun@@@020225I1903A0` — note the suffix is literally the device `sn`), `userName`
+(`DeviceCredential|DC.QZ9xX8SrQRapKTtED6BONA|mqtt-cn-fxf45evy502`), and a `password` field.
+
+**Static analysis first:** searched the app's Dart snapshot and raw `classes*.dex` bytecode for any
+MQTT client (Dart package, or a native Alibaba IoT "LinkKit" `.so`) — found neither. The only
+Alibaba code present is `com.aliyun.sls.*`, their Log Service SDK (crash/telemetry logging),
+completely unrelated to IoT/MQTT. There's a `control_mqtt_mode.dart` / `OperatorMqtt` class (a
+sibling to the BLE control path, `control_ble_mode.dart` / `OperatorBle`), but with no MQTT client
+anywhere in the app, it almost certainly just calls the REST API — "Mqtt mode" describes the
+device's transport, not the app's. **Conclusion: the app itself never connects to this broker
+directly; the `findById` fields are read-only status metadata about the device's own connection**
+(matches the class name `DeviceMqttStatusEntity`), most likely surfaced server-side by Alibaba's
+`GetDeviceCredential`-style API and just relayed for display/diagnostics.
+
+**Live test (with explicit user sign-off, since this touches a real physical device's cloud
+session):**
+1. TCP+TLS reachability check to the endpoint (no MQTT packet sent, zero risk) — succeeded,
+   real TLS 1.3 handshake, confirming a genuine live Aliyun broker instance.
+2. Authenticated `CONNECT` using the exact `clientId`/`userName`/`password` from `findById`, via
+   `paho-mqtt` — **accepted (`rc=0`)**. The credentials are real and directly usable with a
+   standard MQTT client, no signing/derivation needed.
+3. Reconnected and subscribed to broad wildcards (`#`, `+/+`, `+/+/+`, `+/+/+/+`) for a 20-second
+   window — the connection **reconnected roughly every 1.5–2 seconds** for the whole window
+   (~12 cycles) and **zero messages** were received on any subscription.
+4. Tried connecting with two different, non-colliding client IDs (`sunshare-ha-observer-001`,
+   `GID_sun@@@020225I1903A0_observer`), same username/password — both got **`rc=5` (Not
+   Authorized)** immediately.
+
+**Interpretation:** step 4 confirms Alibaba's device-credential auth is scoped to that *exact*
+client ID — there is no way to obtain a separate, non-colliding identity with these credentials.
+Combined with step 3's rapid reconnect-fight (consistent with the device's own firmware retrying
+on a short backoff after being kicked), this means **any connection under this identity directly
+contends with the device's real, live session for as long as it's held open.** A brief
+connect-then-disconnect is a short, self-recovering blip; holding the connection open — which is
+what continuous telemetry/control would require — means permanently and repeatedly disconnecting
+the physical device's own cloud session. This is not a workaround-able quirk; it's exactly what
+per-device credential scoping is designed to prevent.
+
+**Verdict: do not build a Home Assistant integration (or anything else long-running) on this
+channel.** It's a genuine, working MQTT credential, but single-occupancy by design. Stick to the
+REST API (§3's `findDeviceListByUserId`, confirmed to carry live-updating power/status fields) for
+polling, and `updateEmsParaById` (§6) for control.
+
+### `POST app/sysDeviceInfo/findDeviceRealStatusByDeviceId` ⚠️ power/consumption confirmed dead
 Body: `{"deviceId": <deviceId>}`
 
 Returns a status subset of the `findById` fields (`deviceTypeDec`, `emsStatus`, `rssi`, `statusDec`,
-`countryMaxPower`, `offGridState`, etc.) In our testing `power`/`consumption`/`es` were consistently
-`null` here (unlike the `findDeviceListByUserId` variant, where the same-named fields were numeric)
-— we couldn't determine why; possibly requires additional undocumented trigger/timing. Treat
-`findDeviceListByUserId` as the more reliable source for those particular numbers.
+`countryMaxPower`, `offGridState`, etc.) `power`/`consumption`/`es` are consistently `null` here —
+tested with `queryOnlineStatusByDeviceIdAndOpenRealTime` called first and polling every 4s for 32s
+afterward, still null throughout. **Confirmed this endpoint just doesn't carry those fields,
+regardless of the "open real-time session" call or polling duration.** Use
+`findDeviceListByUserId` instead — its same-named fields are numeric and confirmed live (see §3).
 
 ### `POST app/sysDeviceInfo/findDeviceListByHomeIdSimple` ✅ (empty for our home)
 Body: `{"homeId": <homeId>}`. Returned `"data": []` for our home — schema/purpose otherwise unconfirmed;
@@ -171,10 +225,11 @@ possibly only populated for homes with multiple devices sharing a home grouping.
 ### `POST app/sysDeviceInfo/queryOnlineStatusByDeviceIdAndOpenRealTime` ✅
 ### `POST app/sysDeviceInfo/stopRealTimeByDeviceId` ✅
 Body for both: `{"deviceId": <deviceId>}`. Both return `{"data": {"status": 0}}`. Named like a
-start/stop live-telemetry-session pair (the app likely calls "open" before polling status
-repeatedly and "stop" on leaving the screen), but calling "open" then re-reading
-`findDeviceRealStatusByDeviceId` did not populate previously-null fields in our test — possibly needs
-a longer window or the device needs to be actively reporting.
+start/stop live-telemetry-session pair, but confirmed (32s poll test, see
+`findDeviceRealStatusByDeviceId` above) that "opening" a real-time session does not make that
+endpoint's null fields populate. Likely just an online/offline ping pair with a misleading name, or
+tied to a mechanism (push/websocket?) not reachable via polling — not useful for telemetry. Use
+`findDeviceListByUserId` for live numbers instead.
 
 ### `POST app/sysDeviceInfo/getDeviceMqttOnlinOrNotOnlin` ✅
 Body: `{"deviceId": <deviceId>}` → `{"data": {"status": 0}}`. Cheap online/offline check.
