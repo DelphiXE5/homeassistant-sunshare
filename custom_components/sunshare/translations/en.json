@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Sunshare",
+        "data": {
+          "user_account": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Login rejected — check email/password. Note: only one Sunshare session is valid at a time; logging in here will kick out the mobile app session (and vice versa).",
+      "cannot_connect": "Could not reach the Sunshare cloud API."
+    },
+    "abort": {
+      "already_configured": "This Sunshare account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Polling interval (seconds)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status"
+      },
+      "rssi": {
+        "name": "Wi-Fi signal"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "country_max_power": {
+        "name": "Country max power"
+      },
+      "soc_min": {
+        "name": "Battery discharge limit"
+      },
+      "soc_max": {
+        "name": "Battery charge limit"
+      },
+      "lifetime_energy": {
+        "name": "Lifetime energy generated"
+      },
+      "today_energy": {
+        "name": "Today's energy generated"
+      },
+      "lifetime_revenue": {
+        "name": "Lifetime revenue"
+      },
+      "lifetime_co2_saved": {
+        "name": "Lifetime CO2 saved"
+      },
+      "battery_soc": {
+        "name": "Battery SOC"
+      },
+      "battery_temperature": {
+        "name": "Battery temperature"
+      },
+      "battery_remaining_capacity": {
+        "name": "Battery remaining capacity"
+      },
+      "battery_rated_capacity": {
+        "name": "Battery rated capacity"
+      },
+      "battery_power": {
+        "name": "Battery power"
+      },
+      "raw_power": {
+        "name": "Power (raw, unconfirmed)"
+      },
+      "raw_consumption": {
+        "name": "Consumption (raw, unconfirmed)"
+      }
+    },
+    "number": {
+      "output_power": {
+        "name": "Output power"
+      }
+    }
+  }
+}

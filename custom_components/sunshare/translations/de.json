@@ -1,0 +1,89 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Mit Sunshare verbinden",
+        "data": {
+          "user_account": "E-Mail",
+          "password": "Passwort"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Login abgelehnt — E-Mail/Passwort prüfen. Hinweis: Es ist immer nur eine Sunshare-Sitzung gleichzeitig gültig; ein Login hier meldet die App-Sitzung ab (und umgekehrt).",
+      "cannot_connect": "Die Sunshare-Cloud-API war nicht erreichbar."
+    },
+    "abort": {
+      "already_configured": "Dieses Sunshare-Konto ist bereits eingerichtet."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "data": {
+          "scan_interval": "Abfrageintervall (Sekunden)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status"
+      },
+      "rssi": {
+        "name": "WLAN-Signal"
+      },
+      "firmware_version": {
+        "name": "Firmware-Version"
+      },
+      "country_max_power": {
+        "name": "Max. Leistung (Land)"
+      },
+      "soc_min": {
+        "name": "Entladegrenze Batterie"
+      },
+      "soc_max": {
+        "name": "Ladegrenze Batterie"
+      },
+      "lifetime_energy": {
+        "name": "Gesamtertrag"
+      },
+      "today_energy": {
+        "name": "Heutiger Ertrag"
+      },
+      "lifetime_revenue": {
+        "name": "Gesamterlös"
+      },
+      "lifetime_co2_saved": {
+        "name": "Eingespartes CO2 (gesamt)"
+      },
+      "battery_soc": {
+        "name": "Batterie-Ladezustand"
+      },
+      "battery_temperature": {
+        "name": "Batterietemperatur"
+      },
+      "battery_remaining_capacity": {
+        "name": "Batterie Restkapazität"
+      },
+      "battery_rated_capacity": {
+        "name": "Batterie Nennkapazität"
+      },
+      "battery_power": {
+        "name": "Batterieleistung"
+      },
+      "raw_power": {
+        "name": "Leistung (roh, unbestätigt)"
+      },
+      "raw_consumption": {
+        "name": "Verbrauch (roh, unbestätigt)"
+      }
+    },
+    "number": {
+      "output_power": {
+        "name": "Ausgangsleistung"
+      }
+    }
+  }
+}
